@@ -14,6 +14,13 @@
 # We suggest looking at the definitions of certain GNU Assembler Directives 
 	.global add_star
 	.type 	add_star, @function 
+# void add_star(int32_t x, int32_t y, uint32_t color)
+# Inputs: int32_t x, x coordinate of the star 
+#		 int32_t y, y coordinate of the star 
+#		 uint32_t color, color of the star
+# Outputs: None
+# Description: Add a star with specified x, y coordinates and specified color to the skyline star list 
+# Side Effects: Dynamically allocate space for a new star and the skyline_star_list is now started with this new star 
 add_star:
 # callee side convention on entrance
 	addi sp,sp, -32 # 32 byte because we need to store a0-a2 and stack pointer is 16 byte aligned
@@ -54,6 +61,12 @@ fail_add_star:
 
 	.global remove_star
 	.type 	remove_star, @function 
+# void remove_star(int32_t x, int32_t y)
+# Inputs: int32_t x, x coordinate of the star to be removed
+#		  int32_t y, y coordinate of the star to be removed
+# Outputs: None
+# Description: Remove the star at location (x,y) from the star list if it exists
+# Side Effects: Change the star list if a matching star exists, Frees the memory allocated to this star
 remove_star:
 	# callee side convention on entrance
 	addi sp,sp, -16
@@ -106,6 +119,12 @@ fail_remove_star:
 
 	.global	draw_star
 	.type draw_star, @function 
+# void draw_star(uint32_t * fbuf, const struct skyline_star * star)
+# Inputs: uint32_t * fbuf, the pointer that points to buffer waiting for drawing
+# 		 const struct skyline_star * star, the pointer that points to the star waiting to be drawed into buffer
+# Outputs: None
+# Description: Put the given star into the fbuf if that star is within the boundary,return immediatley if any pointer is null
+# Side Effects: Change the content of the buffer with that star's color at that star's location 
 draw_star:
 	# callee side convention on entrance
 	addi sp,sp, -16
@@ -144,6 +163,15 @@ fail_draw_star:
 
 	.global add_window
 	.type   add_window, @function
+# void add_window (int32_t x, int32_t y, uint8_t w, uint8_t h, uint32_t color)
+# Inputs: int32_t x,  x coordinate of the top left corner of the window 
+#		  int32_t y,  y coordinate of the top left corner of the window 
+#    	  uint8_t w,  width of the window
+#		  uint8_t h,  height of the window
+#    	  uint32_t color, color of the window
+# Outputs: None
+# Description: Add a window specified size, color, top left corner to the skyline_windows array
+# Side Effects: Add a window to the skyline_windows array at end and add skyline_win_cnt by 1
 add_window:
 	# callee side convention on entrance
 	addi sp,sp, -16
@@ -180,6 +208,12 @@ fail_add_window:
 
 	.global remove_window
 	.type   remove_window, @function
+# void remove_window(int32_t x, int32_t y)
+# Inputs: int32_t x, x coordinate of the top left corner of the window to be removed
+#		  int32_t y, y coordinate of the top left corner of the window to be removed
+# Outputs: None
+# Description: Remove the window with top left corner at location (x,y) from the window array if it exists and keep the array contiguous
+# Side Effects: Remove a window from the window array and decrease the skyline_win_cnt by 1
 remove_window:
 	# callee side convention on entrance
 	addi sp,sp, -16
@@ -237,6 +271,12 @@ fail_remove_window:
 
 	.global draw_window
 	.type draw_window, @function
+# void draw_window(uint32_t * fbuf, const struct skyline_window * win)
+# Inputs: uint32_t * fbuf, the pointer that points to buffer waiting for drawing
+# 		 const struct skyline_window * win, the pointer that points to the window waiting to be drawed into buffer
+# Outputs: None
+# Description: Put the given window into the fbuf for parts of that window within the boundaries, return immediatley if any pointer is null
+# Side Effects: Change the content of the buffer with that windows color at positions covered by that window
 draw_window:
 # callee side convention on entrance
 	addi sp,sp, -16
@@ -320,7 +360,16 @@ fail_draw_window:
 	.global start_beacon
 	.type start_beacon, @function
 
-
+# void void start_beacon ( const uint32_t * img, int32_t x, int32_t y, uint8_t dia, uint16_t period, uint16_t ontime)
+# Inputs:const uint32_t * img, image of the beacon 
+#				int32_t x, x coordinate of the top left corner of the beacon 
+#				int32_t y, y coordinate of the top left corner of the beacon 
+#				uint8_t dia, diameter of the beacon 
+#				uint16_t period, period of the beacon 
+#				uint16_t ontime, ontime of the beacon 
+# Outputs: None
+# Description: initializes all fields of the /skyline_beacon/ struct with the given values
+# Side Effects: initializes skyline_beacon
 start_beacon:
 	la t0, skyline_beacon
 
@@ -335,15 +384,24 @@ start_beacon:
 
 	.global draw_beacon
 	.type draw_beacon, @function
+# void draw_beacon(uint32_t * fbuf,uint64_t t, const struct skyline_beacon * bcn)
+# Inputs: uint32_t * fbuf, the pointer that points to buffer waiting for drawing
+#		  uint64_t t, current time
+# 		 const struct skyline_beacon * bcn, the pointer that points to the beacon waiting to be drawed into buffer
+# Outputs: None
+# Description: Draw the beacon on the widnow  if the current time% period is smaller than on time, return immediatley if any pointer is null
+# Side Effects: Change the content of the buffer with that beacon's img at positions covered by that beacon 
 draw_beacon:
 	# callee side convention on entrance
-	addi sp,sp, -16
+	addi sp,sp, -32 # I need to store s1 and s2 for offset if x and y are negative
 	sd fp,0(sp)
 	sd ra, 8(sp)
-	addi fp, sp, 16
+	sd s1, 16(sp)
+	sd s2, 24(sp)
+	addi fp, sp, 32
 	# function body
-	beqz a0, fail_draw_window # check for null
-	beqz a2, fail_draw_window
+	beqz a0, fail_draw_beacon # check for null
+	beqz a2, fail_draw_beacon
 	ld t0, 0(a2) #image
 	lw t1, 8(a2) #x
 	lw t2, 12(a2) #y
@@ -362,6 +420,8 @@ draw_beacon:
 	blt t5,x0,fail_draw_beacon
 # passed boundary passes above means at least some part of beacon on window
 	# adjusting 4 boundaries of the window
+	mv s1,t1 # save original x and y for later offset calculation in case x and y are negative
+	mv s2,t2
 	blt t1,x0,left_bound_fix2 # window starting position 
 left_bound_fixed2:
 	bge t4,a3, right_bound_fix2
@@ -373,7 +433,7 @@ lower_bound_fixed2:
 	j allboundary_fixed2
 
 right_bound_fix2:
-	li t4,640 # boundaries are inclusive
+	li t4,640 # boundaries are exclusive
 	j right_bound_fixed2
 left_bound_fix2:
 	li t1,0 
@@ -385,11 +445,21 @@ lower_bound_fix2:
 	li t5, 480
 	j lower_bound_fixed2
 allboundary_fixed2:
+	sub s1, x0,s1 # s1 is negative of original x , means the offset
+	sub s2, x0,s2 # s2 is negative of original y
+	bge s1,x0, img_x_offset # if negative of x is postive, it means there is an x offset, keeps it
+	li s1,0 # if no offset, s1=0
+img_x_offset:
+	bge s2,x0,img_y_offset #if negative of y is postive, it means there is an y offset, keeps it
+	li s2,0 # otherwise s2 = 0
+img_y_offset:
 	mv a3, t1
 	mv a4, t2 # now a3 and a4 set to x and y counter 
 while_drawing_beacon:
 	sub a5, a3,t1
+	add a5,a5,s1 # add x offset to image x
 	sub a6, a4,t2 
+	add a6,a6,s2 # add y offset to image y
 	mul a7,t3,a6 
 	add a7,a7,a5
 	li a5,4
@@ -415,11 +485,15 @@ finished_beacon_drawing:
 	# callee side convention before return 	
 	ld fp, 0(sp)
 	ld ra, 8(sp)
-	addi sp, sp, 16
+	ld s1, 16(sp)
+	ld s2, 24(sp)
+	addi sp, sp, 32
 	ret
 fail_draw_beacon:
 	ld fp, 0(sp)
 	ld ra, 8(sp)
-	addi sp, sp, 16
+	ld s1, 16(sp)
+	ld s2, 24(sp)
+	addi sp, sp, 32
 	ret
 .end
