@@ -157,36 +157,59 @@ void plic_finish_interrupt(int irqno) {
 
 static inline void plic_set_source_priority(uint32_t srcno, uint32_t level) {
 	// YOUR CODE HERE
+	plic->priority[srcno] =level; 
 }
 
 static inline int plic_source_pending(uint32_t srcno) {
 	// YOUR CODE HERE
+	int num=srcno/32;
+	int bit=srcno%32;
+	if(plic->pending[num]&1<<bit){
+		return 1;
+	}else{
+		return 0;
+	}
 }
 
 static inline void plic_enable_source_for_context(uint32_t ctxno, uint32_t srcno) {
 	// YOUR CODE HERE
+	int num=srcno/32;
+	int bit=srcno%32;
+	plic->enable[ctxno][num]=plic->enable[ctxno][num]|1<<bit;
 }
 
 static inline void plic_disable_source_for_context(uint32_t ctxno, uint32_t srcno) {
 	// YOUR CODE HERE
+	int num=srcno/32;
+	int bit=srcno%32;
+	plic->enable[ctxno][num]=plic->enable[ctxno][num]& ~(1<<bit);
 }
 
 static inline void plic_set_context_threshold(uint32_t ctxno, uint32_t level) {
 	// YOUR CODE HERE
+	plic->ctx[ctxno].threshold=level;
 }
 
 static inline uint32_t plic_claim_context_interrupt(uint32_t ctxno) {
 	// YOUR CODE HERE
+	return plic->ctx[ctxno].claim;
 }
 
 static inline void plic_complete_context_interrupt(uint32_t ctxno, uint32_t srcno) {
 	// YOUR CODE HERE
+	plic->ctx[ctxno].claim=srcno;
 }
 
 static void plic_enable_all_sources_for_context(uint32_t ctxno) {
 	// YOUR CODE HERE
+	for(int i=0;i<32;i++){
+		plic->enable[ctxno][i]=0XFFFFFFFF;
+	}
 }
 
 static void plic_disable_all_sources_for_context(uint32_t ctxno) {
 	// YOUR CODE HERE
+	for(int i=0;i<32;i++){
+		plic->enable[ctxno][i]=0X00000000;
+	}
 }
