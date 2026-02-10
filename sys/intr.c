@@ -129,8 +129,19 @@ extern int interrupts_disabled(void) {
 
 void handle_interrupt(unsigned int cause) {
     // YOUR CODE HERE
+    if(cause==RISCV_SCAUSE_STI){
+        handle_timer_interrupt();
+    }else if(cause==RISCV_SCAUSE_SEI){
+        handle_extern_interrupt();}
+    else{
+        panic("unsupported causes");
+    }
+
 }
 
 void handle_extern_interrupt(void) {
     // YOUR CODE HERE
+    int srcno=plic_claim_interrupt();
+    isrtab[srcno].isr(srcno,isrtab[srcno].israux);
+    plic_finish_interrupt(srcno);
 }

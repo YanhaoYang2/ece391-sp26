@@ -59,16 +59,33 @@ static const struct iointf rtc_intf = {
 
 void attach_rtc(void * mmio_base) {
     // YOUR CODE HERE
+    struct rtc_device* rtc=kcalloc(1,sizeof(*rtc));
+    rtc->regs=mmio_base;
+    register_device("rtc",0,&rtc_open,rtc);
+    ioinit(&rtc->io,&rtc_intf,8,0);
+
 }
 
 int rtc_open(struct io ** ioptr, void * aux) {
-    // YOUR CODE HERE
+    // YOUR CODE HERE 
+    struct rtc_device *rtc=aux;
+    *ioptr=ioaddref(&rtc->io);
+    return 0;
 }
 
 long rtc_read(struct io * io, void * buf, long bufsz) {
     // YOUR CODE HERE
+    struct rtc_device *rtc=(void*)io -offsetof(struct rtc_device,io);
+    if(bufsz==0) return 0;
+    uint64_t time_now=read_real_time(rtc->regs);
+    memcpy(buf,&time_now,sizeof(uint64_t));
+    return sizeof(uint64_t);
 }
 
 uint64_t read_real_time(volatile struct rtc_regs * regs) {
     // YOUR CODE HERE
+    uint32_t low=regs->time_low;
+    uint32_t high=regs->time_high;
+    uint64_t result=((uint64_t)high<<32) | (uint64_t)low;
+    return result;
 }

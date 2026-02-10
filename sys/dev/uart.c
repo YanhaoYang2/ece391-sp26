@@ -171,7 +171,9 @@ int uart_open(struct io ** ioptr, void * aux) {
     uart->regs->rbr; // forces a read because uart->regs is volatile
 
     // YOUR CODE HERE
-
+    uart->regs->ier |= IER_DRIE;
+    uart->regs->ier |= IER_THREIE;
+    enable_intr_source(uart->irqno,1,uart_isr,uart);
     *ioptr = ioaddref(&uart->io);
     return 0;
 }
@@ -182,18 +184,64 @@ void uart_reclaim(struct io * io) {
 
     trace("%s()", __func__);
     // YOUR CODE HERE
+    uart->regs->ier &= ~IER_DRIE;
+    uart->regs->ier &= ~IER_THREIE;
+    disable_intr_source(uart->irqno);
 }
 
 long uart_read(struct io * io, void * buf, long bufsz) {
     // YOUR CODE HERE
+    if(bufsz==0) return 0;
+    struct uart_device * const uart = (void*)io - offsetof(struct uart_device, io);
+    long count=0;
+    if(rbuf_empty(&uart->rxbuf)){
+        return 0;
+       }
+    
+    char* store=buf;
+    while(!rbuf_empty(&uart->rxbuf) && count<bufsz){
+        store[count]=rbuf_getc(&uart->rxbuf);
+        count++;
+    }
+    
+    return count;
 }
 
 long uart_write(struct io * io, const void * buf, long buflen) {
     // YOUR CODE HERE
+    if(buflen==0) return 0;
+     struct uart_device * const uart = (void*)io - offsetof(struct uart_device, io);
+     long count=0;
+      char* write=buf;
+     while(count<buflen){
+         if(rbuf_full(&uart->txbuf)){
+            continue;
+        }
+        rbuf_putc(&uart->txbuf,write[count]);
+        count++;
+        uart->regs->ier |= IER_THREIE; 
+     }
+     return count;
 }
 
 void uart_isr(int srcno, void * aux) {
     // YOUR CODE HERE
+    struct uart_device * const uart = aux;
+    char c;
+    if(uart->regs->lsr&LSR_DR){
+        c=uart->regs->rbr;
+        if(!rbuf_full(&uart->rxbuf)){
+         rbuf_putc(&uart->rxbuf,c);}
+    }
+    if(uart->regs->lsr&LSR_THRE){
+        if(!rbuf_empty(&uart->txbuf)){
+        c=rbuf_getc(&uart->txbuf);
+        uart->regs->thr=c;
+    }   else{
+        uart->regs->ier &= ~IER_THREIE; 
+        }
+    }
+
 }
 
 void rbuf_init(struct ringbuf * rbuf) {
