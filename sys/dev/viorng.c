@@ -155,6 +155,7 @@ void viorng_reclaim(struct io * io) {
        struct viorng_device * const vrng =
         (void*)io - offsetof(struct viorng_device, io);
         disable_intr_source(vrng->irqno);
+        virtio_reset_virtq(vrng->regs,0);
 }
 
 long viorng_read(struct io * io, void * buf, long bufsz) {
