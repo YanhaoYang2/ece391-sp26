@@ -187,6 +187,7 @@ void uart_reclaim(struct io * io) {
     uart->regs->ier &= ~IER_DRIE;
     uart->regs->ier &= ~IER_THREIE;
     disable_intr_source(uart->irqno);
+
 }
 
 long uart_read(struct io * io, void * buf, long bufsz) {
@@ -194,8 +195,8 @@ long uart_read(struct io * io, void * buf, long bufsz) {
     if(bufsz==0) return 0;
     struct uart_device * const uart = (void*)io - offsetof(struct uart_device, io);
     long count=0;
-    if(rbuf_empty(&uart->rxbuf)){
-        return 0;
+    while(rbuf_empty(&uart->rxbuf)){
+       continue;
        }
     
     char* store=buf;
@@ -203,7 +204,7 @@ long uart_read(struct io * io, void * buf, long bufsz) {
         store[count]=rbuf_getc(&uart->rxbuf);
         count++;
     }
-    
+    uart->regs->ier |= IER_DRIE; 
     return count;
 }
 
@@ -212,7 +213,7 @@ long uart_write(struct io * io, const void * buf, long buflen) {
     if(buflen==0) return 0;
      struct uart_device * const uart = (void*)io - offsetof(struct uart_device, io);
      long count=0;
-      char* write=buf;
+    const char* write=buf;
      while(count<buflen){
          if(rbuf_full(&uart->txbuf)){
             continue;
@@ -231,7 +232,9 @@ void uart_isr(int srcno, void * aux) {
     if(uart->regs->lsr&LSR_DR){
         c=uart->regs->rbr;
         if(!rbuf_full(&uart->rxbuf)){
-         rbuf_putc(&uart->rxbuf,c);}
+         rbuf_putc(&uart->rxbuf,c);}else{
+            uart->regs->ier &= ~IER_DRIE;
+         }
     }
     if(uart->regs->lsr&LSR_THRE){
         if(!rbuf_empty(&uart->txbuf)){
