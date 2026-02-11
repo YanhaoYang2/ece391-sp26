@@ -48,7 +48,7 @@ struct virtq_avail {
         uint16_t idx;
         uint16_t ring[1];
 };
-struct virtq_used {
+ struct virtq_used {
         uint16_t flags;
         uint16_t idx;
         struct virtq_used_elem ring[1];
@@ -63,7 +63,7 @@ struct viorng_device {
     struct io io;
     struct virtq_desc * desc_table;
     struct virtq_avail *avail;
-    struct virtq_used * used;
+    volatile struct virtq_used * used;
 };
 
 // INTERNAL FUNCTION DECLARATIONS
@@ -171,7 +171,7 @@ long viorng_read(struct io * io, void * buf, long bufsz) {
         __sync_synchronize();
         virtio_notify_avail(vrng->regs,0);
         while(vrng->avail->idx!=vrng->used->idx){
-            continue;;
+            continue;
         }
         return vrng->used->ring[0].len;
 
