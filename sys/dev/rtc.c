@@ -61,7 +61,7 @@ void attach_rtc(void * mmio_base) {
     // YOUR CODE HERE
     struct rtc_device* rtc=kcalloc(1,sizeof(*rtc));
     rtc->regs=mmio_base;
-    register_device("rtc",0,&rtc_open,rtc);
+    register_device("rtc",-1,&rtc_open,rtc);
     ioinit(&rtc->io,&rtc_intf,8,0);
 
 }
