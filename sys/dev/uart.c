@@ -171,10 +171,10 @@ int uart_open(struct io ** ioptr, void * aux) {
     uart->regs->rbr; // forces a read because uart->regs is volatile
 
     // YOUR CODE HERE
+    *ioptr = ioaddref(&uart->io);
     enable_intr_source(uart->irqno,1,uart_isr,uart);
     uart->regs->ier |= IER_DRIE;
     uart->regs->ier |= IER_THREIE;
-    *ioptr = ioaddref(&uart->io);
     return 0;
 }
 
