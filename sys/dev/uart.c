@@ -172,10 +172,11 @@ int uart_open(struct io ** ioptr, void * aux) {
 
     // YOUR CODE HERE
     *ioptr = ioaddref(&uart->io);
+    uart->regs->ier |= IER_DRIE;
+    uart->regs->ier |= IER_THREIE;
     enable_intr_source(uart->irqno,1,uart_isr,uart);
     enable_interrupts();
     uart->regs->ier |= IER_DRIE;
-    uart->regs->ier |= IER_THREIE;
     return 0;
 }
 
