@@ -72,7 +72,18 @@ switch_running_thread:
 start_thread:
 
         # YOUR CODE HERE
-
+        # loading arguments for entry func
+        mv     a0, s0
+        mv     a1, s1
+        mv     a2, s2
+        mv     a3, s3
+        mv     a4, s4
+        mv     a5, s5
+        mv     a6, s6
+        mv     a7, s7
+        la     ra, exit_running_thread #so that after entry function, the thread auto exits 
+        jr     s8
+        
 # Statically allocated stack for the idle thread.
 
         .section        .data.stack, "wa", @progbits

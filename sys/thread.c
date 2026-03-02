@@ -208,6 +208,58 @@ int spawn_thread (
     ...)
 {
     // YOUR CODE HERE
+    //check for available positions in thrab 0 is main thread, 31 is idle thread
+    int tid=-1;
+    for(int i=1;i<NTHR-1;i++){
+        // find an empty space in thrtab
+        if(thrtab[i]==NULL){
+            tid=i;
+            break;
+        }
+    }
+    if(tid==-1) return -EMTHR; // no empty space in thrtab, return too many threads error code
+    // allocating space for thread and its stack, if space not enough, return out of memory error code
+    struct thread* new_thread= kmalloc(sizeof(struct thread));
+    if(!new_thread)return -ENOMEM;
+    void* stack=kmalloc(HEAP_ALLOC_MAX);
+    if(!stack) {
+        // prevent memory leak;
+        kfree(new_thread); 
+        return -ENOMEM;}
+    //starts initializing 
+
+    memset(new_thread, 0, sizeof(*new_thread));
+    new_thread->id=tid;
+    if(name) new_thread->name=name;
+    else new_thread->name="member_thread";
+    va_list ap;
+    va_start(ap,entry);
+    //mapping entry funct argument into context s[]
+    new_thread->ctx.s[0]=va_arg(ap,uintptr_t);
+    new_thread->ctx.s[1]=va_arg(ap,uintptr_t);
+    new_thread->ctx.s[2]=va_arg(ap,uintptr_t);
+    new_thread->ctx.s[3]=va_arg(ap,uintptr_t);
+    new_thread->ctx.s[4]=va_arg(ap,uintptr_t);
+    new_thread->ctx.s[5]=va_arg(ap,uintptr_t);
+    new_thread->ctx.s[6]=va_arg(ap,uintptr_t);
+    new_thread->ctx.s[7]=va_arg(ap,uintptr_t);
+    va_end(ap);
+    new_thread->ctx.s[8]=(uintptr_t)entry;
+    set_thread_state(new_thread,THREAD_READY);
+    new_thread->parent=TP;
+    new_thread->stack_anchor=stack+HEAP_ALLOC_MAX-sizeof(struct thread_stack_anchor); //start of sp
+    new_thread->stack_lowest=stack;
+    new_thread->ctx.sp=stack+HEAP_ALLOC_MAX-sizeof(struct thread_stack_anchor);
+    // a trampoline before entering entry func
+    new_thread->ctx.ra=&start_thread;
+    condition_init(&new_thread->child_exit, "child_exit");
+    new_thread->list_next=NULL;
+    int s=disable_interrupts();
+    tlinsert(&ready_list,new_thread);
+    thrtab[tid]=new_thread;
+    restore_interrupts(s);
+    return tid;
+
 }
 
 
@@ -229,6 +281,25 @@ void exit_running_thread(void) {
     set_thread_state(TP, THREAD_EXITED);
 
     // YOUR CODE HERE
+    // notify joiners
+    if(TP->parent){
+        condition_broadcast(&TP->parent->child_exit);
+    }
+    // process child thread
+    for(int i=0;i<NTHR; i++){
+        if(thrtab[i] && thrtab[i]->parent==TP){
+            //reclaim exited
+            if(thrtab[i]->state==THREAD_EXITED){
+                kfree(thrtab[i]);
+                thrtab[i]=NULL;
+            }else{
+                // orphan the rest 
+                thrtab[i]->parent=NULL;
+            }
+        }
+    }
+    yield_running_thread();
+    halt();
 }
 
 
@@ -243,6 +314,17 @@ void yield_running_thread(void) {
     assert (!tlempty(&ready_list));
 
     // YOUR CODE HERE
+    int s=disable_interrupts();
+    if(TP->state==THREAD_RUNNING){
+        set_thread_state(TP,THREAD_READY);
+        tlinsert(&ready_list,TP);
+    }
+    struct thread * next_thread= tlremove(&ready_list);
+    next_thread->state=THREAD_RUNNING;
+    enable_interrupts();
+    switch_running_thread(next_thread);
+    restore_interrupts(s);
+    
 }
 
 // The finish thread function is only called from switch_running_thread() in
@@ -250,6 +332,26 @@ void yield_running_thread(void) {
 
 void finish_thread_switch(struct thread * susp_thread) {
     // YOUR CODE HERE
+    if(susp_thread->state!=THREAD_EXITED){
+        return;
+    }
+    // skips for static stack
+    if(susp_thread->id==MAIN_TID || susp_thread->id==IDLE_TID){
+        return;
+    }
+    kfree(susp_thread->stack_lowest);
+    int parent_id=-1;
+    for(int i=0;i<NTHR;i++){
+        if(susp_thread->parent==thrtab[i]){
+            parent_id=i ;
+        }
+    }
+     // if it is an orphan, we also need to reclaim its thread struct and thrtab[]
+    if(parent_id==-1){
+        int id=susp_thread->id;
+        kfree(susp_thread);
+        thrtab[id]=NULL;
+    }
 }
 
 int join_thread(int u_tid) {
@@ -257,7 +359,66 @@ int join_thread(int u_tid) {
     trace("%s(%d) in <%s:%d>", __func__, u_tid, TP->name, TP->id);
 
     // YOUR CODE HERE
+    if(u_tid!=0 && thrtab[u_tid]&&thrtab[u_tid]->parent !=TP){
+        //specified child is not your child
+        return -ECHILD;
+    }
+    if(u_tid==0){
+        int error_id=-1;
+         for(int i=0;i<NTHR; i++){
+            if(thrtab[i]&&thrtab[i]->parent==TP){
+            //reclaim exited
+            error_id=i;
+        }
+    }
+    //no child
+    if(error_id==-1){
+        return -ECHILD;
+    }
+    }
+    // fast path exited child thread already exists
+    if(u_tid!=0&& thrtab[u_tid]&& thrtab[u_tid]->state==THREAD_EXITED){
+        kfree(thrtab[u_tid]);
+        thrtab[u_tid]=NULL;
+        return u_tid;
+    }
+    if(u_tid==0){
+            for(int i=0;i<NTHR; i++){
+            if(thrtab[i]&&thrtab[i]->parent==TP){
+                if(thrtab[i]->state==THREAD_EXITED){
+                    kfree(thrtab[i]);
+                    thrtab[i]=NULL;
+                    return i;
+                }
+        }
+    }
 }
+
+    //wait on child exit condition 
+    condition_wait(&TP->child_exit);
+    if(u_tid!=0){
+        // must signal a child exit to wake up condition wait
+        assert(thrtab[u_tid]->state==THREAD_EXITED);
+        kfree(thrtab[u_tid]);
+        thrtab[u_tid]=NULL;
+        return u_tid;
+    }
+    // tid==0, return any child in exit state
+    int exit_child=-1;
+    for(int i=0;i<NTHR; i++){
+            if(thrtab[i]&&thrtab[i]->parent==TP){
+                if(thrtab[i]->state==THREAD_EXITED){
+                    kfree(thrtab[i]);
+                    thrtab[i]=NULL;
+                    exit_child=i;
+                    break;// one thread at a time shall be freed and its id shall be returned
+                }
+            }
+        }
+    assert(exit_child!=-1); // there must be one child in exit state
+    return exit_child;
+}
+
 
 
 // EXPORTED CONDITION VARIABLE FUNCTION DEFINITIONS
@@ -280,6 +441,12 @@ void condition_wait(struct condition * cond) {
     assert(TP->state == THREAD_RUNNING);
 
     // YOUR CODE HERE
+    //prevent isr screw with waitlist
+    int s=disable_interrupts();
+    set_thread_state(TP,THREAD_WAITING);
+    tlinsert(&cond->wait_list,TP);
+    yield_running_thread();
+    restore_interrupts(s);
 }
 
 void condition_broadcast(struct condition * cond) {
@@ -292,6 +459,15 @@ void condition_broadcast(struct condition * cond) {
         return;
 
     // YOUR CODE HERE
+    //remove waked up from wait list and insert into ready list
+     //prevent isr screw with waitlist
+    int s=disable_interrupts();
+    while(!tlempty(&cond->wait_list)){
+        struct thread * waked_UP=tlremove(&cond->wait_list);
+        waked_UP->state=THREAD_READY;
+        tlinsert(&ready_list,waked_UP);
+    }
+    restore_interrupts(s);
 }
 
 // EXPORTED READERS-WRITER LOCK FUNCTION DEFINITIONS
@@ -315,6 +491,9 @@ void condition_broadcast(struct condition * cond) {
 
 void rwlock_init(struct rwlock * rwlk, const char * name) {
     // YOUR CODE HERE
+    memset(rwlk, 0, sizeof(*rwlk));
+    rwlk->owner=NULL;
+    rwlk->cnt=0;
     rwlk->name = (name != NULL) ? name : "anon";
 }
 
@@ -326,12 +505,52 @@ void rwlock_acquire(struct rwlock * rwlk, int exclusive) {
     trace("%s(<%s>,%d)", __func__, rwlk->name, exclusive);
 
     // YOUR CODE HERE
+    //want to own the lock exclusively
+    if(exclusive!=0){
+         if(rwlk->owner==TP){
+            //if  recursively called, add multiplicity
+                int s=disable_interrupts();
+                rwlk->cnt+=1;
+                restore_interrupts(s);
+                return;
+            }
+        else if(rwlk->owner==NULL){
+            int s=disable_interrupts();
+            //only quit if count is zero and owner is null fully unlocked
+            while(rwlk->cnt!=0 || rwlk->owner!=NULL){
+                condition_wait(&rwlk->released);
+            }
+                rwlk->owner=TP;
+                rwlk->cnt+=1;
+                restore_interrupts(s);
+            }
+        
+    }else {
+        // want to own the lock shared
+            int s=disable_interrupts();
+            //wait until rwlk released from exclusive
+            while(rwlk->owner!=NULL){
+                condition_wait(&rwlk->released);}
+            rwlk->owner=NULL;
+            rwlk->cnt+=1;
+            restore_interrupts(s);
+        }
+        
 }
+
 
 void rwlock_release(struct rwlock * rwlk) {
     trace("%s(<%s>)", __func__, rwlk->name);
 
     // YOUR CODE HERE
+    int s =disable_interrupts();
+    rwlk->cnt-=1;
+    // if zero, let waiting list know it is unlocked
+    if(rwlk->cnt==0){
+        condition_broadcast(&rwlk->released);
+        rwlk->owner=NULL;
+    }
+    restore_interrupts(s);
 }
 
 

@@ -92,7 +92,10 @@ struct uart_device {
     struct io io;
 
     // YOUR CODE HERE
-
+    // read write condition separate
+    struct condition rx_cond;  
+    struct condition tx_cond;  
+    struct rwlock lock;
     struct ringbuf rxbuf;
     struct ringbuf txbuf;
 };
@@ -138,7 +141,10 @@ void attach_uart(void * mmio_base, int irqno) {
     uart->irqno = irqno;
 
     // YOUR CODE HERE
-
+    //two conditions for two ring buff
+    condition_init(&uart->tx_cond,"uart_txcond");
+    condition_init(&uart->rx_cond,"uart_rxcond");
+    rwlock_init(&uart->lock,"rwlock");
     // Initialize hardware device
 
     uart->regs->ier = 0;
@@ -195,10 +201,13 @@ long uart_read(struct io * io, void * buf, long bufsz) {
     if(bufsz==0) return 0;
     struct uart_device * const uart = (void*)io - offsetof(struct uart_device, io);
     long count=0;
+    //condition wait
+    int s=disable_interrupts();
     while(rbuf_empty(&uart->rxbuf)){
-       continue;
+        //waiting on rxbuff to have sth 
+       condition_wait(&uart->rx_cond);
        }
-    
+    restore_interrupts(s);
     char* store=buf;
     while(!rbuf_empty(&uart->rxbuf) && count<bufsz){
         store[count]=rbuf_getc(&uart->rxbuf);
@@ -214,14 +223,21 @@ long uart_write(struct io * io, const void * buf, long buflen) {
      struct uart_device * const uart = (void*)io - offsetof(struct uart_device, io);
      long count=0;
     const char* write=buf;
+    //ensure serialization
+    rwlock_acquire(&uart->lock,1);
      while(count<buflen){
-         if(rbuf_full(&uart->txbuf)){
-            continue;
+        int s=disable_interrupts();
+         while(rbuf_full(&uart->txbuf)){
+            //waiting on txbuff to have space
+            condition_wait(&uart->tx_cond);
         }
+        restore_interrupts(s);
+        while(!rbuf_full(&uart->txbuf)&&count<buflen){
         rbuf_putc(&uart->txbuf,write[count]);
-        count++;
+        count++;}
         uart->regs->ier |= IER_THREIE; 
      }
+     rwlock_release(&uart->lock);
      return count;
 }
 
@@ -232,7 +248,11 @@ void uart_isr(int srcno, void * aux) {
     if(uart->regs->lsr&LSR_DR){
         c=uart->regs->rbr;
         if(!rbuf_full(&uart->rxbuf)){
-         rbuf_putc(&uart->rxbuf,c);}else{
+         rbuf_putc(&uart->rxbuf,c);
+         //wake up! sth to read
+         condition_broadcast(&uart->rx_cond);
+        }
+         else{
             uart->regs->ier &= ~IER_DRIE;
          }
     }
@@ -240,6 +260,8 @@ void uart_isr(int srcno, void * aux) {
         if(!rbuf_empty(&uart->txbuf)){
         c=rbuf_getc(&uart->txbuf);
         uart->regs->thr=c;
+        // wake up someplace to fill in 
+         condition_broadcast(&uart->tx_cond);
     }   else{
         uart->regs->ier &= ~IER_THREIE; 
         }
