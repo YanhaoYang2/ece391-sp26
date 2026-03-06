@@ -167,6 +167,7 @@ long viorng_read(struct io * io, void * buf, long bufsz) {
            struct viorng_device * const vrng =
         (void*)io - offsetof(struct viorng_device, io);
         if(bufsz==0) return 0;
+        // want exclusive clock to reach serialization
         rwlock_acquire(&vrng->lock,1);
         vrng->desc_table->addr=(uint64_t)buf;
         vrng->desc_table->len=bufsz;
@@ -177,6 +178,7 @@ long viorng_read(struct io * io, void * buf, long bufsz) {
         __sync_synchronize();
         int s=disable_interrupts();
         virtio_notify_avail(vrng->regs,0);
+        //condition wait for device to process available area;
         while(vrng->avail->idx!=vrng->used->idx){
             condition_wait(&vrng->viorng_cond);
         }
@@ -191,5 +193,6 @@ void viorng_isr(int irqno, void * aux) {
      struct viorng_device * const vrng=aux;
      vrng->regs->interrupt_ack=vrng->regs->interrupt_status;
     __sync_synchronize();
+    //hey wake up used idx is equal to avail idx now
     condition_broadcast(&vrng->viorng_cond);
 }

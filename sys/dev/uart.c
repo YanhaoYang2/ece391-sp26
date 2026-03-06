@@ -178,9 +178,15 @@ int uart_open(struct io ** ioptr, void * aux) {
 
     // YOUR CODE HERE
     *ioptr = ioaddref(&uart->io);
-    enable_intr_source(uart->irqno,1,uart_isr,uart);
+    //register at plic
+    enable_intr_source(uart->irqno,UART_INTR_PRIO,uart_isr,uart);
+    //enable sstatus.sie
+    enable_interrupts();
+    //clean up ier and set bits to enable interrupt
+    uart->regs->ier = 0;
     uart->regs->ier |= IER_DRIE;
     uart->regs->ier |= IER_THREIE;
+    return 0;
     return 0;
 }
 
@@ -190,6 +196,7 @@ void uart_reclaim(struct io * io) {
 
     trace("%s()", __func__);
     // YOUR CODE HERE
+    // disable interrupt bits and unregister plic
     uart->regs->ier &= ~IER_DRIE;
     uart->regs->ier &= ~IER_THREIE;
     disable_intr_source(uart->irqno);
@@ -213,6 +220,7 @@ long uart_read(struct io * io, void * buf, long bufsz) {
         store[count]=rbuf_getc(&uart->rxbuf);
         count++;
     }
+    //rxbuf not full again, enable isr to fill it in
     uart->regs->ier |= IER_DRIE; 
     return count;
 }
@@ -237,6 +245,7 @@ long uart_write(struct io * io, const void * buf, long buflen) {
         count++;}
         uart->regs->ier |= IER_THREIE; 
      }
+     //txbuff not empty again allow isr to move it to thr
      rwlock_release(&uart->lock);
      return count;
 }

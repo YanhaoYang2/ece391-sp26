@@ -244,6 +244,7 @@ int spawn_thread (
     new_thread->ctx.s[6]=va_arg(ap,uintptr_t);
     new_thread->ctx.s[7]=va_arg(ap,uintptr_t);
     va_end(ap);
+    //entry method pointer stored
     new_thread->ctx.s[8]=(uintptr_t)entry;
     set_thread_state(new_thread,THREAD_READY);
     new_thread->parent=TP;
@@ -255,6 +256,7 @@ int spawn_thread (
     condition_init(&new_thread->child_exit, "child_exit");
     new_thread->list_next=NULL;
     int s=disable_interrupts();
+    //prevent interrupt mess with ready list
     tlinsert(&ready_list,new_thread);
     thrtab[tid]=new_thread;
     restore_interrupts(s);
@@ -299,6 +301,7 @@ void exit_running_thread(void) {
         }
     }
     yield_running_thread();
+    //should never reach here
     halt();
 }
 
@@ -314,6 +317,7 @@ void yield_running_thread(void) {
     assert (!tlempty(&ready_list));
 
     // YOUR CODE HERE
+     //prevent isr mess with ready_list
     int s=disable_interrupts();
     if(TP->state==THREAD_RUNNING){
         set_thread_state(TP,THREAD_READY);
@@ -322,6 +326,7 @@ void yield_running_thread(void) {
     struct thread * next_thread= tlremove(&ready_list);
     next_thread->state=THREAD_RUNNING;
     enable_interrupts();
+    //enable interrupt before switching,but need to restore its state after back
     switch_running_thread(next_thread);
     restore_interrupts(s);
     
@@ -376,7 +381,7 @@ int join_thread(int u_tid) {
         return -ECHILD;
     }
     }
-    // fast path exited child thread already exists
+    // child thread already exited
     if(u_tid!=0&& thrtab[u_tid]&& thrtab[u_tid]->state==THREAD_EXITED){
         kfree(thrtab[u_tid]);
         thrtab[u_tid]=NULL;
@@ -441,7 +446,7 @@ void condition_wait(struct condition * cond) {
     assert(TP->state == THREAD_RUNNING);
 
     // YOUR CODE HERE
-    //prevent isr screw with waitlist
+    //prevent isr mess with waitlist
     int s=disable_interrupts();
     set_thread_state(TP,THREAD_WAITING);
     tlinsert(&cond->wait_list,TP);
@@ -460,7 +465,7 @@ void condition_broadcast(struct condition * cond) {
 
     // YOUR CODE HERE
     //remove waked up from wait list and insert into ready list
-     //prevent isr screw with waitlist
+    //prevent isr mess with waitlist and fire between while check and remove
     int s=disable_interrupts();
     while(!tlempty(&cond->wait_list)){
         struct thread * waked_UP=tlremove(&cond->wait_list);
@@ -491,6 +496,7 @@ void condition_broadcast(struct condition * cond) {
 
 void rwlock_init(struct rwlock * rwlk, const char * name) {
     // YOUR CODE HERE
+    //cleanup memory and set any reference to null and 0
     memset(rwlk, 0, sizeof(*rwlk));
     rwlk->owner=NULL;
     rwlk->cnt=0;
