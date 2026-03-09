@@ -4,6 +4,15 @@
 // SPDX-License-identifier: NCSA
 //
 
+#include "memory.h"
+#ifdef IO_TRACE
+#define TRACE
+#endif
+
+#ifdef IO_DEBUG
+#define DEBUG
+#endif
+
 #include "io.h"
 #include "ioimpl.h"
 #include <stddef.h>
@@ -162,68 +171,81 @@ int ioctl_u(struct io * io, int op, uintptr_t u_arg) {
 struct io * seekio_init (
     struct seekio * sio,
     const struct iointf * intf,
-    unsigned long long endpos,
     unsigned int blksz,
     unsigned int refcnt)
 {
     sio->pos = 0;
-    sio->end = endpos;
     return ioinit(&sio->base, intf, blksz, refcnt);
 }
 
 long seekio_read(struct io * io, void * buf, long bufsz) {
     struct seekio * const sio = (struct seekio*)io;
-    long reqlen, retlen;
+    int result;
+    long retlen;
+    unsigned long long end;
+    trace("%s(io=%s,bufsz=%ld)", __func__, io->intf->implname, bufsz);
 
     assert (sio->pos % io->blksz == 0);
-    assert (sio->end % io->blksz == 0);
 
     if (io->intf->fetch == NULL)
         return -ENOTSUP;
     
-    if (sio->pos == sio->end)
+    result = ioctl(io, IOC_GETEND, &end);
+    if (result < 0)
+        return result;
+
+    if (sio->pos == end)
         return 0;
+
+    if (sio->pos > end)
+        return -EINVAL;
     
-    if (sio->end - sio->pos < bufsz)
-        reqlen = sio->end - sio->pos;
-    else
-        reqlen = ROUND_DOWN(bufsz, sio->base.blksz);
+    if (end - sio->pos < bufsz)
+        bufsz = end - sio->pos;
     
-    retlen = io->intf->fetch(&sio->base, sio->pos, buf, reqlen);
+    debug("Calling fetch with pos=%llu, bufsz=%ld", sio->pos, bufsz);
+    retlen = io->intf->fetch(&sio->base, sio->pos, buf, bufsz);
 
     if (retlen <= 0)
         return retlen;
     
-    assert (retlen == reqlen);
+    assert (retlen == bufsz);
     sio->pos += retlen;
     return retlen;
 }
 
 long seekio_write(struct io * io, const void * buf, long len) {
     struct seekio * const sio = (struct seekio*)io;
-    long reqlen, retlen;
-    long new_end;
+    int result;
+    long retlen;
+    unsigned long long end, new_end;
 
     if (io->intf->store == NULL)
         return -ENOTSUP;
     
-    if (sio->end - sio->pos < len) {
+    result = ioctl(io, IOC_GETEND, &end);
+    if (result < 0)
+        return result;
+
+    if (sio->pos + len > end) {
         new_end = sio->pos + len;
-        ioctl(io, IOC_SETEND, &new_end);
-        reqlen = sio->end - sio->pos;
+        if (ioctl(io, IOC_SETEND, &new_end) == 0)
+            len = new_end - sio->pos;
+        else if (sio->pos > end)
+            return -EINVAL;
+        else
+            len = end - sio->pos;
     }
-    else
-        reqlen = ROUND_DOWN(len, sio->base.blksz);
     
-    if (reqlen == 0)
+    if (len == 0)
         return 0;
     
-    retlen = io->intf->store(&sio->base, sio->pos, buf, reqlen);
+    retlen = io->intf->store(&sio->base, sio->pos, buf, len);
 
     if (retlen <= 0)
         return retlen;
     
-    assert (retlen == reqlen);
+    assert (retlen == len);
     sio->pos += retlen;
     return retlen;
 }
@@ -233,18 +255,12 @@ int seekio_ioctl(struct io * io, int op, void * arg) {
     unsigned long long * const ullarg = arg;
 
     switch (op) {
-    case IOC_GETEND:
-        *ullarg = sio->end;
-        return 0;
-    
     case IOC_GETPOS:
         *ullarg = sio->pos;
         return 0;
 
     case IOC_SETPOS:
         if (*ullarg % io->blksz != 0)
-            return -EINVAL;
-        if (sio->end < *ullarg)
             return -EINVAL;
         sio->pos = *ullarg;
         return 0;
@@ -253,11 +269,6 @@ int seekio_ioctl(struct io * io, int op, void * arg) {
         return -ENOTSUP;
     }
 }
-
-void seekio_resized(struct seekio * sio, unsigned long long endpos) {
-    sio->end = endpos;
-}
-
 
 // NULLIO INTERNAL FUNCTION DECLARATIONS
 //
@@ -331,6 +342,7 @@ long nullio_store(struct io * io, unsigned long long pos, const void * buf, long
 
 struct memio {
     struct seekio base;
+    unsigned long long end;
     void * buf;
     void (*reclfn)(void*,size_t);
 };
@@ -341,6 +353,7 @@ struct memio {
 static void memio_reclaim(struct io * io);
 static long memio_fetch(struct io * io, unsigned long long pos, void * buf, long len);
 static long memio_store(struct io * io, unsigned long long pos, const void * buf, long len);
+static int memio_ioctl(struct io * io, int op, void * arg);
 
 // MEMIO INTERNAL CONSTANT DEFINITIONS
 //
@@ -352,7 +365,7 @@ static const struct iointf memio_intf = {
     .write = &seekio_write,
     .fetch = &memio_fetch,
     .store = &memio_store,
-    .ioctl = &seekio_ioctl
+    .ioctl = &memio_ioctl
 };
 
 // MEMIO EXPORTED FUNCTION DEFINITIONS
@@ -363,6 +376,13 @@ struct io * create_memio (
     void(*reclfn)(void*,size_t))
 {
     // YOUR CODE HERE
+    //zero initialized heap memory
+    struct memio *mio =kcalloc(1,sizeof(*mio));
+    if(!mio) return NULL;
+    mio->buf=buf;
+    mio->reclfn=reclfn;
+    mio->end=size;
+    return seekio_init(&mio->base,&memio_intf,1,1);
 }
 
 // MEMIO INTERNAL FUNCTION DEFINITIONS
@@ -372,15 +392,45 @@ void memio_reclaim(struct io * io) {
     struct memio * const mio = (struct memio*)io;
 
     if (mio->reclfn != NULL)
-        mio->reclfn(mio->buf, mio->base.end);
+        mio->reclfn(mio->buf, mio->end);
     
     kfree(mio);
 }
 
 long memio_fetch(struct io * io, unsigned long long pos, void * buf, long len) {
     // YOUR CODE HERE
+    //cast
+    struct memio *mio=(struct memio*)io;
+    //boundary check
+    if(mio->end<pos || mio->end-pos<len){
+        return -EINVAL;
+    }
+    memcpy(buf,mio->buf+pos,len);
+    return len;
+
 }
 
 long memio_store(struct io * io, unsigned long long pos, const void * buf, long len) {
     // YOUR CODE HERE
+    //cast
+     struct memio *mio=(struct memio*)io;
+     //boundary check
+    if(mio->end<pos || mio->end-pos<len){
+        return -EINVAL;
+    }
+    memcpy(mio->buf+pos,buf,len);
+    return len;
+}
+
+int memio_ioctl(struct io * io, int op, void * arg) {
+    // YOUR CODE HERE
+    struct memio *mio=(struct memio*)io;
+    if(op==IOC_GETPOS){
+        // cast void* to unsigned long long * and then dereference it to get/set the value
+        *(unsigned long long*)arg=mio->base.pos;
+    }else if(op == IOC_SETPOS){
+        mio->base.pos= *(unsigned long long*)arg;
+    }else if(op==IOC_GETEND){
+        *(unsigned long long*)arg=mio->end;
+    }
 }

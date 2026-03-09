@@ -84,7 +84,7 @@ extern struct io * ioaddref(struct io * io);
 extern void iodropref(struct io * io);
 
 // Decrements the reference count of an I/O object by 1. If the number of
-// references becomes 0, ioaddref() calls the /reclaim/ function of I/O object.
+// references becomes 0, iodropref() calls the /reclaim/ function of I/O object.
 // iodropref() must be called to signal the end of an I/O object reference's
 // lifetime. After calling iodropref(), /io/ is no longer considered to point to
 // a valid I/O object, although other independent references to the object may
@@ -161,6 +161,8 @@ int ioctl(struct io * io, int op, void * arg);
 #define IOC_SETEND 5 // arg is const unsigned long long *
 #define IOC_GETPOS 6 // arg is unsigned long long *
 #define IOC_SETPOS 7 // arg is const unsigned long long *
+
+#define IOC_MAPBUF 8 // arg is const void **
 
 // Performs a special operation on an I/O object. The /op/ parameter specifies
 // the operation, one of the IOC-prefixed constants defined above. The operation

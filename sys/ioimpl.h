@@ -302,18 +302,16 @@ extern struct io * ioinit (
 struct seekio {
     struct io base;
     unsigned long long pos;
-    unsigned long long end;
 };
 
 extern struct io * seekio_init (
     struct seekio * sio,
     const struct iointf * intf,
-    unsigned long long endpos,
     unsigned int blksz,
     unsigned int refcnt
 );
 
-extern long seekio_read(struct io * io, void * buf, long blkcap);
+extern long seekio_read(struct io * io, void * buf, long bufsz);
 
 // Reads from a seek-io object into a buffer at its internal position.
 // Equivalent to iofetch, with internal position set to /pos/.
@@ -321,7 +319,7 @@ extern long seekio_read(struct io * io, void * buf, long blkcap);
 // * This function may switch to another thread context.
 // * This function must _not_ be called from an ISR.
 
-extern long seekio_write(struct io * io, const void * buf, long blkcnt);
+extern long seekio_write(struct io * io, const void * buf, long len);
 
 // Writes from a buffer to a seek-io object to its internal position.
 // Equivalent to iostore, with internal position set to /pos/.
