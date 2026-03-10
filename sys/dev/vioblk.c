@@ -121,7 +121,7 @@ struct vioblk_device {
     struct virtq_avail *avail;
     volatile struct virtq_used * used;
     struct condition vioblk_cond;
-    struct rwlock lock;
+    struct rwlock lock;              
 };
 
 // INTERNAL FUNCTION DECLARATIONS
@@ -165,8 +165,7 @@ void vioblk_attach(volatile struct virtio_mmio_regs * regs, int irqno) {
     struct vioblk_device * vb;
     unsigned int blksz;
     int result;
-    
-	trace("%s(regs=%p,irqno=%d)", __func__, regs, irqno);
+    trace("%s(regs=%p,irqno=%d)", __func__, regs, irqno);
 
     assert (regs->device_id == VIRTIO_ID_BLOCK);
 
@@ -225,8 +224,8 @@ void vioblk_attach(volatile struct virtio_mmio_regs * regs, int irqno) {
     // Read maximum queue size (number of elements) from QueueNumMax. 
     assert(regs->queue_num_max>0);
     //allocate and zero the queue
-    vb->avail=kcalloc(1,sizeof(*vb->avail));
-    vb->used=kcalloc(1,sizeof(*vb->used));
+    vb->avail = kcalloc(1, sizeof(*vb->avail));
+    vb->used = kcalloc(1, sizeof(*vb->used));
     // zero the descriptor table
     for(int i=0;i<VIRTQ_LEN;i++){
         vb->desc_table[i].addr=0;
@@ -237,7 +236,7 @@ void vioblk_attach(volatile struct virtio_mmio_regs * regs, int irqno) {
     //initailize the index 
     vb->used->idx=0;
     vb->avail->idx=0;
-    virtio_attach_virtq(regs,0,1,(uint64_t)vb->desc_table,(uint64_t) vb->used,(uint64_t) vb->avail);
+    virtio_attach_virtq(regs,0,4,(uint64_t)vb->desc_table,(uint64_t) vb->used,(uint64_t) vb->avail);
     virtio_enable_virtq(regs,0);
         __sync_synchronize();
     register_device(VIOBLK_NAME,instcnt++,&vioblk_open,vb);
@@ -273,8 +272,8 @@ long vioblk_fetch (
     if(bytecnt+bytepos> vb->capacity*vb->blk_size) 
     {return -EINVAL;}
     rwlock_acquire(&vb->lock,1);
-    struct vioblk_request_header vb_reqeust;
-    uint8_t status;
+     struct vioblk_request_header vb_reqeust; 
+    uint8_t status;     
     vb_reqeust.type=VIRTIO_BLK_T_IN;
     vb_reqeust.sector=bytepos/vb->blk_size;
     
@@ -307,13 +306,7 @@ long vioblk_fetch (
         }
     restore_interrupts(s);
     rwlock_release(&vb->lock);
-    if(status==VIRTIO_BLK_S_OK ){
-            return bytecnt;
-    }else if(status==VIRTIO_BLK_S_IOERR){
-            return -EIO; // IO mistake
-    }else {
-            return -ENOTSUP; // operation not supported;
-    }
+    return bytecnt;
 }
 
 
@@ -330,13 +323,13 @@ long vioblk_store (
     if(bytecnt+bytepos> vb->capacity*vb->blk_size) 
     {return -EINVAL;}
     rwlock_acquire(&vb->lock,1);
-    struct vioblk_request_header vb_reqeust;
-    uint8_t status;
+    struct vioblk_request_header vb_reqeust; 
+    uint8_t status;     
     vb_reqeust.type=VIRTIO_BLK_T_OUT;
-    vb_reqeust.sector=bytepos/vb->blk_size;
+   vb_reqeust.sector=bytepos/vb->blk_size;
       // three tables first request, next data buffer, final the status
     vb->desc_table[0].addr=(uint64_t)&vb_reqeust;
-    vb->desc_table[0].len=sizeof(vb_reqeust);
+    vb->desc_table[0].len=sizeof( vb_reqeust);
     // indicating it is chained and read only
     vb->desc_table[0].flags=VIRTQ_DESC_F_NEXT;
     vb->desc_table[0].next=1;
@@ -363,21 +356,17 @@ long vioblk_store (
         }
     restore_interrupts(s);
     rwlock_release(&vb->lock);
-    if(status==VIRTIO_BLK_S_OK ){
-            return bytecnt;
-    }else if(status==VIRTIO_BLK_S_IOERR){
-            return -EIO; // IO mistake
-    }else {
-            return -ENOTSUP; // operation not supported;
-    }
+    return bytecnt;
 }
 
 int vioblk_ioctl(struct io * io, int op, void * arg) {
     // YOUR CODE HERE
      struct vioblk_device * const vb =
         (void*)io - offsetof(struct vioblk_device, io);
+        unsigned long long * const ullarg=arg;
     if(op==IOC_GETEND){
-        return vb->blk_size*vb->capacity;
+        *ullarg =vb->blk_size*vb->capacity;
+        return 0;
     }else {
         return -ENOTSUP;
     }

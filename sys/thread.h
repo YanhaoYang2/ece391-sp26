@@ -167,8 +167,9 @@ extern void __attribute__ ((noreturn)) exit_running_thread(void);
 // Termimates the currently running thread. This function does not return. If
 // the calling thread is the main thread, the system halts. If the calling
 // thread is not the main thread, its parent will be able to join the calling
-// thread using join_thread(). If the calling thread has any children, the
-// /main/ thread becomes the new parent of the children.
+// thread using join_thread(). If the calling thread has any children, it will
+// reclaim the thread struct and space in thrtab of children which have exited
+// and orphan the children which have not exited.
 //
 // After exiting, a child is still considered to exist in the system until it is
 // joined by its parent.

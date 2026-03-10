@@ -101,7 +101,7 @@ extern void sleep_until(unsigned long long twake);
 // leep_until() returns immediately. Otherwise, the calling thread is suspended
 // until /twake/.
 //
-// On return alarm_sleep_until() guarantees:
+// On return sleep_until() guarantees:
 // - The current time, as returned by rdtime(), it not before /twake/.
 //
 // Performance guarantees:

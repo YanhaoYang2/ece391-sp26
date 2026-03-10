@@ -405,7 +405,7 @@ long memio_fetch(struct io * io, unsigned long long pos, void * buf, long len) {
     if(mio->end<pos || mio->end-pos<len){
         return -EINVAL;
     }
-    memcpy(buf,mio->buf+pos,len);
+    memcpy(buf,(char*)mio->buf+pos,len);
     return len;
 
 }
@@ -418,19 +418,27 @@ long memio_store(struct io * io, unsigned long long pos, const void * buf, long 
     if(mio->end<pos || mio->end-pos<len){
         return -EINVAL;
     }
-    memcpy(mio->buf+pos,buf,len);
+    memcpy((char*)mio->buf+pos,buf,len);
     return len;
 }
 
 int memio_ioctl(struct io * io, int op, void * arg) {
     // YOUR CODE HERE
     struct memio *mio=(struct memio*)io;
+    unsigned long long * const ullarg=arg;
     if(op==IOC_GETPOS){
-        // cast void* to unsigned long long * and then dereference it to get/set the value
-        *(unsigned long long*)arg=mio->base.pos;
+       *ullarg =mio->base.pos;
+       return 0;
     }else if(op == IOC_SETPOS){
-        mio->base.pos= *(unsigned long long*)arg;
+        if(*ullarg%io->blksz!=0){
+            return -EINVAL;
+        }
+        mio->base.pos= *ullarg;
+        return 0;
     }else if(op==IOC_GETEND){
-        *(unsigned long long*)arg=mio->end;
+        *ullarg=mio->end;
+        return  0;
+    }else {
+        return -ENOTSUP;
     }
 }

@@ -22,7 +22,7 @@
 
 #include <stddef.h>
 #include <limits.h> // for ULLONG_MAX
-
+#include "heap.h"
 // COMPILE-TIME OPTIONS
 //
 
@@ -35,6 +35,9 @@
 
 struct timer_alarm {
     // YOUR CODE HERE
+  unsigned long long twake;   // wake time in ticks
+  struct condition    woken;  // Condition from CP3
+  struct timer_alarm *next;   // next one to wake
 };
 
 // EXPORTED GLOBAL VARIABLES
@@ -46,9 +49,9 @@ unsigned int timer_frequency = 0;
 
 // INTERNAL GLOBAL VARIABLES
 //
-
+//used for preemptive scheduling
+int bold_period;
 static struct timer_alarm * sleep_list; // list of pending alarms
-
 
 // INTERNAL FUNCTION DECLARATIONS
 //
@@ -63,22 +66,56 @@ static void disable_timer_interrupts(void); // clears sie.STIE
 
 void timer_init(unsigned int freq) {
     // YOUR CODE HERE
+    timer_frequency=freq;
+    bold_period=freq/BOLT_FREQ;
+    timer_initialized=1;
+    sbi_set_timer(0); //trigger first interrupt
+    enable_interrupts();
 }
 
-void alarm_sleep_until(unsigned long long twake) {
+void sleep_until(unsigned long long twake) {
     // YOUR CODE HERE
+    if(rdtime()>=twake) return;
+    disable_timer_interrupts();
+    struct timer_alarm * ta=kcalloc(1,sizeof(*ta));
+    ta->twake=twake;
+    condition_init(&ta->woken,"time_wake_condition");
+    ta->next=NULL;
+    if(!sleep_list){
+        //if nothing in sleep list we need to set mtimecmp correctly so that time interrupt occurs
+        sleep_list=ta;
+    }else{
+        struct timer_alarm* cur=sleep_list;
+        struct timer_alarm* before=NULL;
+        while(cur && cur->twake<ta->twake){
+            before=cur;
+            cur=cur->next;
+        }
+        ta->next=cur;
+        if(before){
+            before->next=ta;
+        }else{
+            sleep_list=ta;
+        }
+    }
+    int s=disable_interrupts();
+    enable_timer_interrupts();
+    while(rdtime()<twake){
+    condition_wait(&ta->woken);}
+    restore_interrupts(s);
+    kfree(ta);
 }
 
 void sleep_sec(unsigned int sec) {
-    alarm_sleep_until(rdtime() + 1ULL * sec * timer_frequency);
+    sleep_until(rdtime() + 1ULL * sec * timer_frequency);
 }
 
 void sleep_ms(unsigned int ms) {
-    alarm_sleep_until(rdtime() + 1ULL * ms * timer_frequency / 1000);
+    sleep_until(rdtime() + 1ULL * ms * timer_frequency / 1000);
 }
 
 void sleep_us(unsigned int us) {
-    alarm_sleep_until(rdtime() + 1ULL * us * timer_frequency / 1000 / 1000);
+    sleep_until(rdtime() + 1ULL * us * timer_frequency / 1000 / 1000);
 }
 
 void handle_timer_interrupt(void) {
@@ -88,6 +125,22 @@ void handle_timer_interrupt(void) {
     trace("[%lu] %s()", tnow, __func__);
 
     // YOUR CODE HERE
+    struct timer_alarm* cur=sleep_list;
+    struct timer_alarm* prev=NULL;
+    while(cur && cur->twake<=tnow){
+        condition_broadcast(&cur->woken);
+        prev=cur;
+        cur=cur->next;
+        prev->next=NULL;
+    }
+    sleep_list=cur;
+    if(sleep_list) sbi_set_timer(sleep_list->twake);
+    else{
+        unsigned long long tbolt=tnow+bold_period;
+        sbi_set_timer(tbolt);
+    }
+
+
 }
 
 // INTERNAL FUNCTION DEFINITIONS
