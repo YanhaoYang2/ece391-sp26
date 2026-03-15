@@ -129,9 +129,11 @@ extern int interrupts_disabled(void) {
 
 void handle_interrupt(unsigned int cause) {
     // YOUR CODE HERE
+    // if time inteerupt dispatch to timer handler
     if(cause==RISCV_SCAUSE_STI){
         handle_timer_interrupt();
-    }else if(cause==RISCV_SCAUSE_SEI){
+    }//if extern interrupt, dispatch to extern handler
+    else if(cause==RISCV_SCAUSE_SEI){
         handle_extern_interrupt();}
     else{
         panic("unsupported causes");

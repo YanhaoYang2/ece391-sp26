@@ -247,6 +247,7 @@ int vioblk_open(struct io ** ioptr, void * aux) {
     // YOUR CODE HERE
     struct vioblk_device * const vb=aux;
     *ioptr= ioaddref(&vb->io);
+    // interrupt enabled at open
     enable_intr_source(vb->irqno,1,vioblk_isr,vb);
     return 0;
 }
@@ -255,6 +256,7 @@ void vioblk_reclaim(struct io * io) {
     // YOUR CODE HERE
            struct vioblk_device * const vb =
         (void*)io - offsetof(struct vioblk_device, io);
+        // interrupt disabled for this device
         disable_intr_source(vb->irqno);
         virtio_reset_virtq(vb->regs,0);
 }
@@ -364,10 +366,11 @@ int vioblk_ioctl(struct io * io, int op, void * arg) {
      struct vioblk_device * const vb =
         (void*)io - offsetof(struct vioblk_device, io);
         unsigned long long * const ullarg=arg;
+        // handle get end operation which is size*capacity
     if(op==IOC_GETEND){
         *ullarg =vb->blk_size*vb->capacity;
         return 0;
-    }else {
+    }else {// other operations not supported
         return -ENOTSUP;
     }
 }

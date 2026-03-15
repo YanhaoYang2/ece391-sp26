@@ -379,9 +379,11 @@ struct io * create_memio (
     //zero initialized heap memory
     struct memio *mio =kcalloc(1,sizeof(*mio));
     if(!mio) return NULL;
+    //intialize fields with parameters
     mio->buf=buf;
     mio->reclfn=reclfn;
     mio->end=size;
+    //return io pointer by seek_init 
     return seekio_init(&mio->base,&memio_intf,1,1);
 }
 
@@ -405,6 +407,7 @@ long memio_fetch(struct io * io, unsigned long long pos, void * buf, long len) {
     if(mio->end<pos || mio->end-pos<len){
         return -EINVAL;
     }
+    //copy data from memory to user buffer
     memcpy(buf,(char*)mio->buf+pos,len);
     return len;
 
@@ -418,27 +421,34 @@ long memio_store(struct io * io, unsigned long long pos, const void * buf, long 
     if(mio->end<pos || mio->end-pos<len){
         return -EINVAL;
     }
+    //copy data from user buffer to memory
     memcpy((char*)mio->buf+pos,buf,len);
     return len;
 }
 
 int memio_ioctl(struct io * io, int op, void * arg) {
     // YOUR CODE HERE
+    //cast
     struct memio *mio=(struct memio*)io;
     unsigned long long * const ullarg=arg;
+    // handle get position operation
     if(op==IOC_GETPOS){
        *ullarg =mio->base.pos;
        return 0;
-    }else if(op == IOC_SETPOS){
+    }
+    // handle set position operation
+    else if(op == IOC_SETPOS){
         if(*ullarg%io->blksz!=0){
             return -EINVAL;
         }
         mio->base.pos= *ullarg;
         return 0;
-    }else if(op==IOC_GETEND){
+    }
+      // handle get end operation
+    else if(op==IOC_GETEND){
         *ullarg=mio->end;
         return  0;
-    }else {
+    }else { // other operations not supported
         return -ENOTSUP;
     }
 }

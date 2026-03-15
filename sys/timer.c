@@ -67,6 +67,7 @@ static void disable_timer_interrupts(void); // clears sie.STIE
 void timer_init(unsigned int freq) {
     // YOUR CODE HERE
     timer_frequency=freq;
+    //set automatic time interrupt period according to frequency 
     bold_period=freq/BOLT_FREQ;
     timer_initialized=1;
     sbi_set_timer(0); //trigger first interrupt
@@ -75,6 +76,7 @@ void timer_init(unsigned int freq) {
 
 void sleep_until(unsigned long long twake) {
     // YOUR CODE HERE
+    // ignore those who have passed the wake up time
     if(rdtime()>=twake) return;
     disable_timer_interrupts();
     struct timer_alarm * ta=kcalloc(1,sizeof(*ta));
@@ -85,6 +87,7 @@ void sleep_until(unsigned long long twake) {
         //if nothing in sleep list we need to set mtimecmp correctly so that time interrupt occurs
         sleep_list=ta;
     }else{
+        // insert the current time_alarm into sleeplist's correct position so it is still in ascending order
         struct timer_alarm* cur=sleep_list;
         struct timer_alarm* before=NULL;
         while(cur && cur->twake<ta->twake){
@@ -100,6 +103,7 @@ void sleep_until(unsigned long long twake) {
     }
     int s=disable_interrupts();
     enable_timer_interrupts();
+    // condition wait until its wake up time is up 
     while(rdtime()<twake){
     condition_wait(&ta->woken);}
     restore_interrupts(s);
@@ -127,6 +131,7 @@ void handle_timer_interrupt(void) {
     // YOUR CODE HERE
     struct timer_alarm* cur=sleep_list;
     struct timer_alarm* prev=NULL;
+    // let all waiting threads whose time has passed wake up 
     while(cur && cur->twake<=tnow){
         condition_broadcast(&cur->woken);
         prev=cur;
@@ -134,6 +139,7 @@ void handle_timer_interrupt(void) {
         prev->next=NULL;
     }
     sleep_list=cur;
+    // if there is still condition waiting in sleep list set timer to that time otherwise use bold period
     if(sleep_list) sbi_set_timer(sleep_list->twake);
     else{
         unsigned long long tbolt=tnow+bold_period;
