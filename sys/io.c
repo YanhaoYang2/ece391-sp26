@@ -394,6 +394,17 @@ struct io * create_memio (
     void(*reclfn)(void*,size_t))
 {
     // YOUR CODE HERE
+    struct memio * mio;
+    
+    assert (buf != NULL || size == 0);
+    mio = kcalloc(1, sizeof(*mio));
+    mio->buf = buf;
+    mio->end = size;
+    mio->reclfn = reclfn;
+
+    return seekio_init (
+        &mio->base, &memio_intf,
+        /* blksz */ 1, /* refcnt */ 1);
 }
 
 // MEMIO INTERNAL FUNCTION DEFINITIONS
@@ -401,18 +412,63 @@ struct io * create_memio (
 
 void memio_reclaim(struct io * io) {
     // YOUR CODE HERE
+    struct memio * const mio = (struct memio*)io;
+
+    if (mio->reclfn != NULL)
+        mio->reclfn(mio->buf, mio->end);
+    
+    kfree(mio);
 }
 
 long memio_fetch(struct io * io, unsigned long long pos, void * buf, long len) {
     // YOUR CODE HERE
+    struct memio * const mio = (struct memio*)io;
+
+    assert (io != NULL);
+    assert (pos % io->blksz == 0); // ensured by iofetch()
+    assert (len % io->blksz == 0); // ensured by iofetch()
+    assert (0 <= len); // ensured by iofetch()
+
+    if (mio->end < pos || mio->end - pos < len)
+        return -EINVAL;
+    
+    memcpy(buf, mio->buf + pos, len);
+    return len;
 }
 
 long memio_store(struct io * io, unsigned long long pos, const void * buf, long len) {
     // YOUR CODE HERE
+    struct memio * const mio = (struct memio*)io;
+
+    assert (io != NULL);
+    assert (pos % io->blksz == 0); // ensured by iostore()
+    assert (len % io->blksz == 0); // ensured by iostore()
+    assert (0 <= len); // ensured by iostore()
+
+    if (mio->end < pos || mio->end - pos < len)
+        return -EINVAL;
+    
+    memcpy(mio->buf + pos, buf, len);
+    return len;
 }
 
 int memio_ioctl(struct io * io, int op, void * arg) {
     // YOUR CODE HERE
+    struct memio * const mio = (struct memio*)io;
+    unsigned long long * const ullarg = arg;
+
+    switch (op) {
+    case IOC_GETPOS:
+    case IOC_SETPOS:
+        return seekio_ioctl(io, op, arg);
+    
+    case IOC_GETEND:
+        *ullarg = mio->end;
+        return 0;
+    
+    default:
+        return -ENOTSUP;
+    }
 }
 
 

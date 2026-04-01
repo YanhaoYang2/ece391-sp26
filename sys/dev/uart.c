@@ -1,10 +1,8 @@
-// uart.c - NS8250-compatible UART
+// uart.c - NS8550-compatible UART
 //
 // Copyright (c) 2024-2026 University of Illinois
 // SPDX-License-identifier: NCSA
 //
-
-// TODO rename this file to ns8250.c
 
 #ifdef UART_TRACE
 #define TRACE
@@ -14,7 +12,7 @@
 #define DEBUG
 #endif
 
-#include "board-conf.h"
+#include "conf.h"
 #include "intr.h"
 #include "heap.h"
 #include "thread.h"
@@ -89,8 +87,7 @@ struct ringbuf {
 
 struct uart_device {
     volatile struct uart_regs * regs;
-    int irqno; // interrupt source number for this UART
-    char rxoe; // OE was set on entry to ISR
+    int irqno;
 
     struct io io;
 
@@ -98,6 +95,9 @@ struct uart_device {
 
     struct ringbuf rxbuf;
     struct ringbuf txbuf;
+    struct condition rx_ready;
+    struct condition tx_ready;
+    struct rwlock wlock;
 };
 
 // INTERNAL FUNCTION DEFINITIONS
@@ -107,13 +107,12 @@ static int uart_open(struct io ** ioptr, void * aux);
 static void uart_reclaim(struct io * io);
 static long uart_read(struct io * io, void * buf, long bufsz);
 static long uart_write(struct io * io, const void * buf, long len);
-static int uart_ioctl(struct io * io, int op, void * arg);
 
 static void uart_isr(int srcno, void * aux);
 
 // Ring buffer (struct rbuf) functions
 
-static void rbuf_reset(struct ringbuf * rbuf);
+static void rbuf_init(struct ringbuf * rbuf);
 static int rbuf_empty(const struct ringbuf * rbuf);
 static int rbuf_full(const struct ringbuf * rbuf);
 static void rbuf_putc(struct ringbuf * rbuf, char c);
@@ -126,8 +125,7 @@ static const struct iointf uart_intf = {
     .implname = "uart",
     .read = &uart_read,
     .write = &uart_write,
-    .reclaim = &uart_reclaim,
-    .ioctl = &uart_ioctl
+    .reclaim = &uart_reclaim
 };
 
 // EXPORTED FUNCTION DEFINITIONS
@@ -143,6 +141,11 @@ void attach_uart(void * mmio_base, int irqno) {
     uart->irqno = irqno;
 
     // YOUR CODE HERE
+    rbuf_init(&uart->rxbuf);
+    rbuf_init(&uart->txbuf);
+    condition_init(&uart->rx_ready, "uart.rx_ready");
+    condition_init(&uart->tx_ready, "uart.tx_ready");
+    rwlock_init(&uart->wlock, "uart.wlock");
 
     // Initialize hardware device
 
@@ -168,15 +171,16 @@ int uart_open(struct io ** ioptr, void * aux) {
     
     // Reset receive and transmit buffers
     
-    rbuf_reset(&uart->rxbuf);
-    rbuf_reset(&uart->txbuf);
-    uart->rxoe = 0;
+    rbuf_init(&uart->rxbuf);
+    rbuf_init(&uart->txbuf);
 
     // Read RBR to flush any stale data in hardware buffer
 
     uart->regs->rbr; // forces a read because uart->regs is volatile
 
     // YOUR CODE HERE
+    enable_intr_source(uart->irqno, UART_INTR_PRIO, uart_isr, uart);
+    uart->regs->ier = IER_DRIE;
 
     *ioptr = ioaddref(&uart->io);
     return 0;
@@ -187,51 +191,84 @@ void uart_reclaim(struct io * io) {
         (void*)io - offsetof(struct uart_device, io);
 
     trace("%s()", __func__);
-
     // YOUR CODE HERE
+    uart->regs->ier = 0;
+    disable_intr_source(uart->irqno);
 }
 
 long uart_read(struct io * io, void * buf, long bufsz) {
-    struct uart_device * const uart =
-        (void*)io - offsetof(struct uart_device, io);
-
     // YOUR CODE HERE
+    struct uart_device * uart = (void*)io - offsetof(struct uart_device, io);
+    char * p = buf;
+    long n = 0;
 
-    return -ENOTSUP; // remove after implementing this function
+    if (bufsz == 0)
+        return 0;
+
+    disable_interrupts();
+    while (rbuf_empty(&uart->rxbuf))
+        condition_wait(&uart->rx_ready);
+
+    while (n < bufsz && !rbuf_empty(&uart->rxbuf))
+        p[n++] = rbuf_getc(&uart->rxbuf);
+
+    enable_interrupts();
+    return n;
 }
 
 long uart_write(struct io * io, const void * buf, long buflen) {
-    struct uart_device * const uart =
-        (void*)io - offsetof(struct uart_device, io);
-
     // YOUR CODE HERE
+    struct uart_device * uart = (void*)io - offsetof(struct uart_device, io);
+    const char * p = buf;
+    long n = 0;
 
-    return -ENOTSUP; // remove after implementing this function
-}
-
-int uart_ioctl(struct io * io, int op, void * arg) {
-    struct uart_device * const uart =
-        (void*)io - offsetof(struct uart_device, io);
-    int pie;
-    
-    switch (op) {
-    case IOC_RESET:
-        pie = disable_interrupts();
-        rbuf_reset(&uart->rxbuf);
-        rbuf_reset(&uart->txbuf);
-        uart->rxoe = 0;
-        restore_interrupts(pie);
+    if (buflen == 0)
         return 0;
-    default:
-        return -ENOTSUP;
+
+    rwlock_acquire(&uart->wlock, 1);
+
+    while (n < buflen) {
+        disable_interrupts();
+        while (rbuf_full(&uart->txbuf))
+            condition_wait(&uart->tx_ready);
+
+        rbuf_putc(&uart->txbuf, p[n++]);
+        uart->regs->ier |= IER_THREIE;
+        enable_interrupts();
     }
+
+    rwlock_release(&uart->wlock);
+    return n;
 }
 
 void uart_isr(int srcno, void * aux) {
     // YOUR CODE HERE
+    struct uart_device * uart = aux;
+    int rx = 0, tx = 0;
+
+    (void)srcno;
+
+    while ((uart->regs->lsr & LSR_DR) && !rbuf_full(&uart->rxbuf)) {
+        rbuf_putc(&uart->rxbuf, uart->regs->rbr);
+        rx = 1;
+    }
+
+    while ((uart->regs->lsr & LSR_THRE) && !rbuf_empty(&uart->txbuf)) {
+        uart->regs->thr = rbuf_getc(&uart->txbuf);
+        tx = 1;
+    }
+
+    if (rbuf_empty(&uart->txbuf))
+        uart->regs->ier &= ~IER_THREIE;
+
+    if (rx)
+        condition_broadcast(&uart->rx_ready);
+
+    if (tx || !rbuf_full(&uart->txbuf))
+        condition_broadcast(&uart->tx_ready);
 }
 
-void rbuf_reset(struct ringbuf * rbuf) {
+void rbuf_init(struct ringbuf * rbuf) {
     rbuf->hpos = 0;
     rbuf->tpos = 0;
 }

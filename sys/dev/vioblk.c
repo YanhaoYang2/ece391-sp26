@@ -1,6 +1,6 @@
 // vioblk.c - VirtIO block device
 //
-// Copyright (c) 2024-2026 University of Illinois
+// Copyright (c) 2024-2025 University of Illinois
 // SPDX-License-identifier: NCSA
 //
 
@@ -19,7 +19,7 @@
 #include "thread.h"
 #include "error.h"
 #include "string.h"
-#include "board-conf.h"
+#include "conf.h"
 #include "misc.h"
 #include "error.h"
 #include "console.h"
@@ -80,10 +80,59 @@ struct vioblk_request_header {
 #define VIRTIO_BLK_S_IOERR      1
 #define VIRTIO_BLK_S_UNSUPP     2
 
-// VirtIO Block Device with virtqueues and condition variables 
+/**
+ * @brief VirtIO Block Device with virtqueues and condition variables
+ */ 
 
 struct vioblk_device {
     // YOUR CODE HERE
+    struct io io;
+
+    volatile struct virtio_mmio_regs * regs;
+    int irqno;
+    unsigned int blksz;
+    unsigned long long size;                //total disk capacity in bytes
+
+    struct condition used_updated;
+    struct rwlock lock;
+
+    uint16_t qlen;                          //number of the descriptor spaces in the virtqueue
+    uint16_t lui;               //last used index, allow increment
+
+    int vq_flag;
+
+    struct vioblk_request_header reqhdr;
+    uint8_t status;
+
+    struct {
+        uint64_t addr;
+        uint32_t len;
+        uint16_t flags;
+        uint16_t next;
+    } desc[1];              //the descriptor placed in the available ring
+
+    struct {
+        uint64_t addr;
+        uint32_t len;
+        uint16_t flags;
+        uint16_t next;
+    } indirect_desc[3];     //request header, data buffer, status byte
+
+    struct {
+        uint16_t flags;
+        uint16_t idx;
+        uint16_t ring[1];
+        uint16_t used_event;
+    } avail;                //the available ring
+
+    volatile struct {
+        uint16_t flags;
+        uint16_t idx;
+        struct {
+            uint32_t id;
+            uint32_t len;
+        } ring[1];
+    } used;                 //the used ring
 };
 
 // INTERNAL FUNCTION DECLARATIONS
@@ -112,8 +161,6 @@ static const struct iointf vioblk_intf = {
     .reclaim = &vioblk_reclaim,
     .fetch = &vioblk_fetch,
     .store = &vioblk_store,
-    .read = &seekio_read,
-    .write = &seekio_write,
     .ioctl = &vioblk_ioctl
 };
 
@@ -171,14 +218,76 @@ void vioblk_attach(volatile struct virtio_mmio_regs * regs, int irqno) {
     assert (((blksz - 1) & blksz) == 0);
 
     // YOUR CODE HERE
+    vb = kcalloc(1, sizeof(*vb));
+    vb->regs = regs;
+    vb->irqno = irqno;
+    vb->blksz = blksz;
+    vb->size = regs->config.blk.capacity * 512ULL;
+    vb->qlen = 1;
+    vb->lui = 0;
+    condition_init(&vb->used_updated, "vioblk.used_updated");
+    rwlock_init(&vb->lock, "vioblk.lock");
+//allocate and initialize the device structure
+    vb->desc[0].addr = (uint64_t)(uintptr_t)vb->indirect_desc;
+    vb->desc[0].len = sizeof(vb->indirect_desc);
+    vb->desc[0].flags = VIRTQ_DESC_F_INDIRECT;
+    vb->desc[0].next = 0;
+
+    vb->indirect_desc[0].addr = (uint64_t)(uintptr_t)&vb->reqhdr;
+    vb->indirect_desc[0].len = sizeof(vb->reqhdr);
+    vb->indirect_desc[0].flags = VIRTQ_DESC_F_NEXT;
+    vb->indirect_desc[0].next = 1;
+
+    vb->indirect_desc[2].addr = (uint64_t)(uintptr_t)&vb->status;
+    vb->indirect_desc[2].len = 1;
+    vb->indirect_desc[2].flags = VIRTQ_DESC_F_WRITE;
+    vb->indirect_desc[2].next = 0;
+//initialize synchronization, build the descriptor layout, and attach the virq to the device
+    regs->queue_sel = 0;
+    __sync_synchronize();
+    //write descriptor table, aval, device
+    virtio_attach_virtq(regs, 0, vb->qlen, (uint64_t)(uintptr_t)vb->desc, (uint64_t)(uintptr_t)&vb->used, (uint64_t)(uintptr_t)&vb->avail);
+
+    ioinit(&vb->io, &vioblk_intf, blksz, 0);
+
+    regs->status |= VIRTIO_STAT_DRIVER_OK;
+    __sync_synchronize();
+
+    register_device(VIOBLK_NAME, instcnt++, &vioblk_open, vb);
 }
 
 int vioblk_open(struct io ** ioptr, void * aux) {
     // YOUR CODE HERE
+    struct vioblk_device * const vb = aux;
+//handle firstly open initialization
+    if (iorefcnt(&vb->io) == 0) {
+        vb->regs->interrupt_ack = vb->regs->interrupt_status;
+        __sync_synchronize();
+        if (!vb->vq_flag) {
+            virtio_enable_virtq(vb->regs, 0);
+            vb->vq_flag = 1;
+        }
+//enable intterupts ad the virtq
+        enable_intr_source(vb->irqno, VIOBLK_INTR_PRIO, vioblk_isr, vb);
+        // virtio_enable_virtq(vb->regs, 0);
+    }
+
+    *ioptr = ioaddref(&vb->io);
+    return 0;
 }
 
 void vioblk_reclaim(struct io * io) {
     // YOUR CODE HERE
+    struct vioblk_device * const vb = (struct vioblk_device *)io;
+
+    disable_intr_source(vb->irqno);     //disabled the interrupt source
+
+    // vb->regs->queue_sel = 0;
+    // __sync_synchronize();
+    // vb->regs->queue_ready = 0;
+
+    vb->regs->interrupt_ack = vb->regs->interrupt_status;   //clear the device's intterupt status
+    __sync_synchronize();
 }
 
 long vioblk_fetch (
@@ -188,6 +297,54 @@ long vioblk_fetch (
     long bytecnt)
 {
     // YOUR CODE HERE
+    struct vioblk_device * const vb = (struct vioblk_device *)io;
+//check if the request is in the device boundary
+    if (bytecnt == 0)
+        return 0;
+
+    if (vb->size < bytepos || vb->size - bytepos < (unsigned long long)bytecnt)
+        return -EINVAL;
+//serialize the request and build the block
+    rwlock_acquire(&vb->lock, 1);
+
+    vb->reqhdr.type = VIRTIO_BLK_T_IN;
+    vb->reqhdr.reserved = 0;
+    vb->reqhdr.sector = bytepos / 512;
+    vb->status = 0xFF;
+
+    vb->indirect_desc[1].addr = (uint64_t)(uintptr_t)buf;
+    vb->indirect_desc[1].len = bytecnt;
+    vb->indirect_desc[1].flags = VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE;
+    vb->indirect_desc[1].next = 2;
+
+    disable_interrupts();
+//submit the request to the ring
+    vb->avail.ring[0] = 0;
+    __sync_synchronize();
+    vb->avail.idx += 1;
+    __sync_synchronize();
+
+    virtio_notify_avail(vb->regs, 0);
+//wait until completed
+    while (vb->used.idx == vb->lui){
+        condition_wait(&vb->used_updated);
+        disable_interrupts();
+    }
+        
+
+    __sync_synchronize();
+    vb->lui += 1;
+
+    enable_interrupts();
+//release the lock and translate the device status to the result
+    rwlock_release(&vb->lock);
+
+    if (vb->status == VIRTIO_BLK_S_OK)
+        return bytecnt;
+    else if (vb->status == VIRTIO_BLK_S_UNSUPP)
+        return -ENOTSUP;
+    else
+        return -EIO;
 }
 
 
@@ -198,12 +355,76 @@ long vioblk_store (
     long bytecnt)
 {
     // YOUR CODE HERE
+    struct vioblk_device * const vb = (struct vioblk_device *)io;
+//check if the request is in the boundary
+    if (bytecnt == 0)return 0;
+    if (vb->size < bytepos || vb->size - bytepos < (unsigned long long)bytecnt) return -EINVAL;
+//acquire the lock and biuld the block
+    rwlock_acquire(&vb->lock, 1);
+
+    vb->reqhdr.type = VIRTIO_BLK_T_OUT;
+    vb->reqhdr.reserved = 0;
+    vb->reqhdr.sector = bytepos / 512;
+    vb->status = 0xFF;
+
+    vb->indirect_desc[1].addr = (uint64_t)(uintptr_t)buf;
+    vb->indirect_desc[1].len = bytecnt;
+    vb->indirect_desc[1].flags = VIRTQ_DESC_F_NEXT;
+    vb->indirect_desc[1].next = 2;
+
+    disable_interrupts();
+//submit it to an available ring
+    vb->avail.ring[0] = 0;
+    __sync_synchronize();
+    vb->avail.idx += 1;
+    __sync_synchronize();
+
+    virtio_notify_avail(vb->regs, 0);
+//wait until finished
+    while (vb->used.idx == vb->lui){
+        condition_wait(&vb->used_updated);
+        disable_interrupts();
+    }
+        
+
+    __sync_synchronize();
+    vb->lui += 1;
+
+    enable_interrupts();
+//release the lock and then return
+    rwlock_release(&vb->lock);
+
+    if (vb->status == VIRTIO_BLK_S_OK) return bytecnt;
+    else if (vb->status == VIRTIO_BLK_S_UNSUPP) return -ENOTSUP;
+    else return -EIO;
 }
 
 int vioblk_ioctl(struct io * io, int op, void * arg) {
     // YOUR CODE HERE
+    struct vioblk_device * const vb = (struct vioblk_device *)io;
+    unsigned long long * const ullarg = arg;
+//do the correct operation and reject unsupported ones.
+    switch (op) {
+    case IOC_GETEND:
+        if (ullarg == NULL)
+            return -EINVAL;
+        *ullarg = vb->size;
+        return 0; //success
+    default:
+        return -ENOTSUP;
+    }
 }
 
 void vioblk_isr(int irqno, void * aux) {
     // YOUR CODE HERE
+    struct vioblk_device * const vb = aux;
+    uint32_t st;
+
+    (void)irqno;
+//read and catch the interrupt, wake spinning thread for finishing it.
+    st = vb->regs->interrupt_status;
+    vb->regs->interrupt_ack = st;
+    __sync_synchronize();
+
+    condition_broadcast(&vb->used_updated);
 }

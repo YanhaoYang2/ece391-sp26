@@ -37,25 +37,25 @@
 
 struct plic_regs {
 	union {
-		uint32_t priority[PLIC_SRC_CNT]; // Interrupt Priorities registers
+		uint32_t priority[PLIC_SRC_CNT]; /**< Interrupt Priorities registers */
 		char _reserved_priority[0x1000];
 	};
 
 	union {
-		uint32_t pending[PLIC_SRC_CNT/32]; // Interrupt Pending Bits registers
+		uint32_t pending[PLIC_SRC_CNT/32]; /**< Interrupt Pending Bits registers */
 		char _reserved_pending[0x1000];
 	};
 
 	union {
-		uint32_t enable[PLIC_CTX_CNT][32]; // Interrupt Enables registers
+		uint32_t enable[PLIC_CTX_CNT][32]; /**< Interrupt Enables registers */
 		char _reserved_enable[0x200000-0x2000];
 	};
 
 	struct {
 		union {
 			struct {
-				uint32_t threshold;	// Priority Thresholds registers
-				uint32_t claim;	// Interrupt Claim/Completion registers
+				uint32_t threshold;	/**< Priority Thresholds registers */
+				uint32_t claim;	/**< Interrupt Claim/Completion registers */
 			};
 			
 			char _reserved_ctxctl[0x1000];
@@ -129,7 +129,7 @@ void plic_init(void * mmio_base) {
 
 void plic_enable_source(int srcno, int prio) {
 	trace("%s(srcno=%d,prio=%d)", __func__, srcno, prio);
-	assert (0 < srcno && srcno <= PLIC_SRC_CNT);
+	assert (0 < srcno && srcno < PLIC_SRC_CNT);
 	assert (prio > 0);
 
 	plic_set_source_priority(srcno, prio);
@@ -137,7 +137,7 @@ void plic_enable_source(int srcno, int prio) {
 
 void plic_disable_source(int srcno) {
 	trace("%s()", __func__);
-	assert (0 < srcno && srcno <= PLIC_SRC_CNT);
+	assert (0 < srcno && srcno < PLIC_SRC_CNT);
 
 	plic_set_source_priority(srcno, 0);
 }
@@ -157,36 +157,55 @@ void plic_finish_interrupt(int irqno) {
 
 static inline void plic_set_source_priority(uint32_t srcno, uint32_t level) {
 	// YOUR CODE HERE
+	plic->priority[srcno] = level;			//set priority at srcno to level
 }
 
 static inline int plic_source_pending(uint32_t srcno) {
 	// YOUR CODE HERE
+	if((plic->pending[srcno/32] >> (srcno % 32)) % 2 == 1){
+		return 1;
+	}
+	else{
+		return 0;
+	}
+
 }
 
 static inline void plic_enable_source_for_context(uint32_t ctxno, uint32_t srcno) {
 	// YOUR CODE HERE
+	plic->enable[ctxno][srcno / 32] = plic->enable[ctxno][srcno / 32] | ((uint32_t)1 << (srcno % 32)); //set the bit to 1 to enable the source, regardless if the bit is 1 or 0
 }
 
 static inline void plic_disable_source_for_context(uint32_t ctxno, uint32_t srcno) {
 	// YOUR CODE HERE
+	plic->enable[ctxno][srcno / 32] = plic->enable[ctxno][srcno / 32] & ~((uint32_t)1 << (srcno % 32)); //opposite to above, set the bit to 0
 }
 
 static inline void plic_set_context_threshold(uint32_t ctxno, uint32_t level) {
 	// YOUR CODE HERE
+	plic->ctx[ctxno].threshold = level;		//set the context threshold at ctxno to level
 }
 
 static inline uint32_t plic_claim_context_interrupt(uint32_t ctxno) {
 	// YOUR CODE HERE
+	return plic->ctx[ctxno].claim;			//read the claim register and claim it
 }
 
 static inline void plic_complete_context_interrupt(uint32_t ctxno, uint32_t srcno) {
 	// YOUR CODE HERE
+	plic->ctx[ctxno].claim = srcno;			//set the claim to source number
 }
 
 static void plic_enable_all_sources_for_context(uint32_t ctxno) {
 	// YOUR CODE HERE
+	for(uint32_t i = 1; i < PLIC_SRC_CNT; i++){
+		plic_enable_source_for_context(ctxno, i);		//enable all the sources from number 1 to 95
+	}
 }
 
 static void plic_disable_all_sources_for_context(uint32_t ctxno) {
 	// YOUR CODE HERE
+	for(uint32_t i = 1; i < PLIC_SRC_CNT; i++){
+		plic_disable_source_for_context(ctxno, i);		//disable all the sources from number 1 to 95
+	}
 }

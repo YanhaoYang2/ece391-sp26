@@ -35,6 +35,10 @@
 
 struct timer_alarm {
     // YOUR CODE HERE
+    struct timer_alarm * next;
+    unsigned long long twake;
+    int expired;
+    struct condition cond;//build of the struct timer alarm
 };
 
 // EXPORTED GLOBAL VARIABLES
@@ -63,10 +67,43 @@ static void disable_timer_interrupts(void); // clears sie.STIE
 
 void timer_init(unsigned int freq) {
     // YOUR CODE HERE
+    timer_frequency = freq;         //record the hardware timer frequency
+    sleep_list = NULL;
+    disable_timer_interrupts();
+    sbi_set_timer(ULLONG_MAX);
+    timer_initialized = 1;
 }
 
 void sleep_until(unsigned long long twake) {
     // YOUR CODE HERE
+    struct timer_alarm alarm;
+    struct timer_alarm ** a_add;
+
+    if (twake <= rdtime()){
+        return;
+    }              //skip out if the wake time is passed
+        
+
+    memset(&alarm, 0, sizeof(alarm));
+    alarm.twake = twake;
+    condition_init(&alarm.cond, "timer_alarm");
+
+    disable_interrupts();
+//insert the alarm into the sleep list
+    a_add = &sleep_list;
+    while (*a_add != NULL && (*a_add)->twake <= twake){
+        a_add = &(*a_add)->next;
+    }
+    alarm.next = *a_add;
+    *a_add = &alarm;
+
+    sbi_set_timer(sleep_list->twake);
+    enable_timer_interrupts();
+//sleep until the alarm is expired
+    while (!alarm.expired){
+        condition_wait(&alarm.cond);
+    }
+    enable_interrupts();
 }
 
 void sleep_sec(unsigned int sec) {
@@ -88,6 +125,22 @@ void handle_timer_interrupt(void) {
     trace("[%lu] %s()", tnow, __func__);
 
     // YOUR CODE HERE
+    struct timer_alarm * a;
+//remove and wake all alarms expired
+    while (sleep_list != NULL && sleep_list->twake <= tnow) {
+        a = sleep_list;
+        sleep_list = a->next;
+        a->expired = 1;
+        condition_broadcast(&a->cond);
+    }
+
+    if (sleep_list != NULL) {
+        sbi_set_timer(sleep_list->twake);
+        enable_timer_interrupts();
+    } else {
+        sbi_set_timer(ULLONG_MAX);
+        disable_timer_interrupts();
+    }//disable interrupts if no alarms is here
 }
 
 // INTERNAL FUNCTION DEFINITIONS

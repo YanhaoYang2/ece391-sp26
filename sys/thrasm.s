@@ -72,6 +72,19 @@ switch_running_thread:
 start_thread:
 
         # YOUR CODE HERE
+        mv      a0, s0
+        mv      a1, s1
+        mv      a2, s2
+        mv      a3, s3
+        mv      a4, s4
+        mv      a5, s5
+        mv      a6, s6
+        mv      a7, s7
+
+        mv      t0, s8
+        jalr    t0
+
+        call    exit_running_thread
 
 # Statically allocated stack for the idle thread.
 

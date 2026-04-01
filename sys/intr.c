@@ -133,10 +133,29 @@ extern int interrupts_disabled(void) {
 
 void handle_interrupt(unsigned int cause) {
     // YOUR CODE HERE
+    if (cause == RISCV_SCAUSE_SEI) {
+        handle_extern_interrupt();
+        return;
+    }
+
+    if (cause == RISCV_SCAUSE_STI) {
+        handle_timer_interrupt();
+        return;
+    }
+
+    panic("wrong interrupt");
     return;
 }
 
 void handle_extern_interrupt(void) {
     // YOUR CODE HERE
+    int n = plic_claim_interrupt();
+    if(n == 0){
+        return;
+    }
+    if(isrtab[n].isr != NULL){
+        isrtab[n].isr(n, isrtab[n].israux);
+    }
+    plic_finish_interrupt(n);
     return;
 }

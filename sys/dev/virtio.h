@@ -1,5 +1,6 @@
-// virtio.h
-// MMIO-based VirtIO. See end of the file for licenses
+/*! @file virtio.h
+    @brief MMIO-based VirtIO. See end of the file for licenses
+*/
 
 #ifndef _VIRTIO_H_
 #define _VIRTIO_H_
@@ -40,46 +41,46 @@
 typedef uint32_t virtio_featset_t[VIRTIO_FEATLEN];
 
 struct virtio_mmio_regs {
-    uint32_t magic_value;           // R  Magic value
-    uint32_t version;               // R  Device version number
-    uint32_t device_id;             // R  Virtio Subsystem Device ID
-    uint32_t vendor_id;             // R  Virtio Subsystem Vendor ID
-    uint32_t device_features;       // R  Flags representing features the device supports
+    uint32_t magic_value;           ///< R  Magic value
+    uint32_t version;               ///< R  Device version number
+    uint32_t device_id;             ///< R  Virtio Subsystem Device ID
+    uint32_t vendor_id;             ///< R  Virtio Subsystem Vendor ID
+    uint32_t device_features;       ///< R  Flags representing features the device supports
  
-    uint32_t device_features_sel;   // W  Device (host) features word selection.
+    uint32_t device_features_sel;   ///< W  Device (host) features word selection.
  
     uint32_t _reserved_0x18[2]; 
-    uint32_t driver_features;       // W  Flags representing device features understood and activated by the driver
+    uint32_t driver_features;       ///< W  Flags representing device features understood and activated by the driver
  
-    uint32_t driver_features_sel;   // W  Activated (guest) features word selection
+    uint32_t driver_features_sel;   ///< W  Activated (guest) features word selection
  
     uint32_t _reserved_0x28[2]; 
-    uint32_t queue_sel;             // W  Virtual queue index
+    uint32_t queue_sel;             ///< W  Virtual queue index
  
-    uint32_t queue_num_max;         // R  Maximum virtual queue size
+    uint32_t queue_num_max;         ///< R  Maximum virtual queue size
  
-    uint32_t queue_num;             // W  Virtual queue size
+    uint32_t queue_num;             ///< W  Virtual queue size
  
     uint32_t _reserved_0x3c[2];
-    uint32_t queue_ready;           // RW Virtual queue ready bit
+    uint32_t queue_ready;           ///< RW Virtual queue ready bit
 
     uint32_t _reserved_0x48[2];
-    uint32_t queue_notify;          // W  Queue notifier
+    uint32_t queue_notify;          ///< W  Queue notifier
     uint32_t _reserved_0x54[3];
-    uint32_t interrupt_status;      // R  Interrupt status
-    uint32_t interrupt_ack;         // W  Interrupt acknowledge
+    uint32_t interrupt_status;      ///< R  Interrupt status
+    uint32_t interrupt_ack;         ///< W  Interrupt acknowledge
     uint32_t _reserved_0x68[2];
-    uint32_t status;                // RW Device status
+    uint32_t status;                ///< RW Device status
     uint32_t _reserved_0x74[3];
-    uint64_t queue_desc;            // W  Virtual queue’s Descriptor Area 64 bit long physical address
+    uint64_t queue_desc;            ///< W  Virtual queue’s Descriptor Area 64 bit long physical address
     uint32_t _reserved_0x8c[2];
-    uint64_t queue_driver;          // W  Virtual queue’s Driver Area 64 bit long physical address
+    uint64_t queue_driver;          ///< W  Virtual queue’s Driver Area 64 bit long physical address
     uint32_t _reserved_0x9c[2];
-    uint64_t queue_device;          // W  Virtual queue’s Device Area 64 bit long physical address
-    uint32_t shm_sel;               // W  Shared memory id
-    uint64_t shm_len;               // R  Shared memory region 64 bit long length
-    uint64_t shm_base;              // R  Shared memory region 64 bit long physical address
-    uint32_t queue_reset;           // RW Virtual queue reset bit
+    uint64_t queue_device;          ///< W  Virtual queue’s Device Area 64 bit long physical address
+    uint32_t shm_sel;               ///< W  Shared memory id
+    uint64_t shm_len;               ///< R  Shared memory region 64 bit long length
+    uint64_t shm_base;              ///< R  Shared memory region 64 bit long physical address
+    uint32_t queue_reset;           ///< RW Virtual queue reset bit
     uint32_t _reserved_0xc4[14];
     
     union {
@@ -131,74 +132,92 @@ struct virtio_mmio_regs {
 // EXPORTED FUNCTION DECLARATIONS
 //
 
-// Checks the features device has enabled
-// The /regs/ argument specifies register struct for device
-// The /k/ argument specifies feature bit to verify
-// Returns 1 if enabled, 0 if not
+/**
+* @brief Checks the features device has enabled
+* @param regs register struct for device
+* @param k feature bit to verify
+* @return 1 if enabled, 0 if not
+*/
 static inline int virtio_check_feature (
     volatile struct virtio_mmio_regs * regs, uint_fast16_t k);
 
-// Sets feature bits of device
-// The /regs/ argument specifies register struct for device
-// The /enabled_features/ argument specifies feature bits enabled by device
-// The /wanted_features/ argument specifies desired features (superset of needed)
-// The /needed_features/ argument specifies needed features (returns error if cannot be set)
-// Returns 0 on success, -ENOTSUP on failure
+/**
+* @brief Sets feature bits of device
+* @param regs register struct for device
+* @param enabled_features feature bits enabled by device
+* @param wanted_features desired features (superset of needed)
+* @param needed_features needed features (returns error if cannot be set)
+* @return 0 on success, -ENOTSUP on failure
+*/
 extern int virtio_negotiate_features (
     volatile struct virtio_mmio_regs * regs,
     virtio_featset_t enabled_features,
     const virtio_featset_t wanted_features,
     const virtio_featset_t needed_features);
 
-// Notifies the device of new elements in the avail ring.
-// This function is safe to call from an ISR.
-// The /regs/ argument specifies register struct for device.
-// The /qid/ argument specifies updated virtq id.
-// Returns void
+/**
+* @brief Notifies the device of new elements in the avail ring. 
+* @details This function is safe to call from an ISR.
+* @param regs register struct for device.
+* @param qid updated virtq id.
+* @return void
+*/
 static inline void virtio_notify_avail (
     volatile struct virtio_mmio_regs * regs, int qid);
 
-// Attaches virtq for device communication
-// The /regs/ argument specifies register struct for device
-// The /qid/ argument specifies id of virtq to attach
-// The /len/ argument specifies len of virtq
-// The /desc_addr/ argument specifies address of descriptor table
-// The /used_addr/ argument specifies virtq addr written to by device
-// The /avail_addr/ argument specifies virtq addr read from by device
-// Returns void
+/**
+* @brief Attaches virtq for device communication 
+* @param regs register struct for device
+* @param qid id of virtq to attach
+* @param len len of virtq
+* @param desc_addr address of descriptor table
+* @param used_addr virtq addr written to by device
+* @param avail_addr virtq addr read from by device
+* @return void
+*/
 extern void virtio_attach_virtq (
     volatile struct virtio_mmio_regs * regs, int qid, uint_fast16_t len,
     uint64_t desc_addr, uint64_t used_addr, uint64_t avail_addr);
 
-// Sets virtq of device to ready
-// The /regs/ argument specifies register struct for device
-// The /qid/ argument specifies virtq id to enable
-// Returns void
+/**
+* @brief Sets virtq of device to ready
+* @param regs register struct for device
+* @param qid virtq id to enable
+* @return void
+*/
 static inline void virtio_enable_virtq (
     volatile struct virtio_mmio_regs * regs, int qid);
 
-// Sends reset signal tp device for virtq
-// The /regs/ argument specifies register struct for device
-// The /qid/ argument specifies virtq id to reset
-// Returns void
+/**
+* @brief Sends reset signal tp device for virtq
+* @param regs register struct for device
+* @param qid virtq id to reset
+* @return void
+*/
 static inline void virtio_reset_virtq (
     volatile struct virtio_mmio_regs * regs, int qid);
 
-// Zero-initializes a VirtIO feature set bitmap.
-// The /fts/ argument specifies feature set to initialize
-// Returns void
+/**
+* @brief Zero-initializes a VirtIO feature set bitmap.
+* @param fts feature set to initialize
+* @return void
+*/
 static inline void virtio_featset_init(virtio_featset_t fts);
 
-// Sets a feature in a VirtIO feature set bitmap.
-// The /fts/ argument specifies feature set to add k
-// The /k/ argument specifies feature bit
-// Returns void
+/**
+* @brief Sets a feature in a VirtIO feature set bitmap.
+* @param fts feature set to add k
+* @param k feature bit
+* @return void
+*/
 static inline void virtio_featset_add(virtio_featset_t fts, uint_fast16_t k);
 
-// Returns 1 if feature bit is set, and 0 otherwise.
-// The /fts/ argument specifies feature set to test
-// The /k/ argument specifies feature bit
-// Returns 1 is set, 0 otherwise
+/**
+* @brief Returns 1 if feature bit is set, and 0 otherwise.
+* @param fts feature set to test
+* @param k feature bit
+* @return 1 is set, 0 otherwise
+*/
 static inline int virtio_featset_test(virtio_featset_t fts, uint_fast16_t k);
 
 
