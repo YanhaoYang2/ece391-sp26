@@ -31,6 +31,17 @@
 
 // INTERNAL FUNCTION DECLARATIONS
 //
+struct filesystem ngfs {
+
+}
+
+struct iointf ngfs_file_intf {
+
+}
+
+struct iointf ngfs_listing_intf {
+    
+}
 
 
 // INTERNAL GLOBAL VARIABLES
