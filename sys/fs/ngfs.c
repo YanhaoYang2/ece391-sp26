@@ -231,11 +231,44 @@ void ngfs_flush(struct filesystem * fs) {
 
 long ngfs_listing_read(struct io * lsio, void * buf, long bufsz) {
     // YOUR CODE HERE
+    struct ngfs_listingio * const listingio = (struct ngfs_listingio *)lsio;
+    struct ngfs_dir_entry dir;
+    unsigned long i;
+    size_t name_len;
+    size_t copy_len;
+    int result;
+
+    if (listingio ==NULL || (buf == NULL && bufsz != 0))
+        return -EINVAL;
+
+    if (buf == NULL || bufsz == 0)
+        return 0;
+    
+    for (i = listingio->next_index; i < NGFS_BLKSZ / NGFS_DENSZ; i++) {
+        result = ngfs_read_root_dir(listingio->fs, i, &dir);
+        if (result < 0)
+            return result;
+        if (dir.name[0] == '\0')
+            continue; // empty entry, skip
+        name_len = strnlen(dir.name, sizeok(dir.name));
+        if (name_len < (size_t)bufsz) {
+            copy_len = name_len;
+        } else {
+            copy_len = (size_t)bufsz;
+        }
+
+        memcpy(buf, dir.name, copy_len);
+        listingio->next_index = i + 1; // update next index for next call
+        return copy_len;
+    }
+
     return 0;
 }
 
 void ngfs_listing_reclaim(struct io * lsio) {
     // YOUR CODE HERE
+    struct ngfs_listingio * const listingio = (struct ngfs_listingio *)lsio;
+    kfree(listingio);
 }
 
 
@@ -243,8 +276,28 @@ void ngfs_listing_reclaim(struct io * lsio) {
 //
 static uint32_t get_next_data_block(const struct ngfs_mount * fs, uint32_t cur_block) {
     // YOUR CODE HERE
-    return 0;
+    void * blk;
+    struct ngfs_fat * fat_blk;
+    unsigned long fat_blk_index;
+    unsigned long fat_entry_index;
+    uint32_t next_block;
+
+    assert (fs != NULL);
+    assert (cur_block < ngfs_data_block_count(fs));
+
+    fat_blk_index = cur_block / NGFS_FAT_ENTRIES_PER_BLOCK;
+    fat_entry_index = cur_block % NGFS_FAT_ENTRIES_PER_BLOCK;
+
+    assert (cache_fetch(fs->cache, fat_blk_index * NGFS_BLKSZ, 1, &blk) >= 0);
+
+    fat_blk = (struct ngfs_fat *) blk;
+    next_block = fat_blk->fat[fat_entry_index];
+
+    cache_release(fs->cache, blk, 0);
+    
+    return next_block;
 }
+
 static void set_next_data_block(const struct ngfs_mount * fs, uint32_t cur_block, uint32_t next_block) {
     // YOUR CODE HERE
 }
@@ -288,6 +341,7 @@ static int ngfs_read_root_dir(struct ngfs_mount * fs, unsigned long index, struc
     // then fectch root directory block from the cache. cache_fetch expects
     // byte offset, so multiply block number by block size to get byte offset.
     root_phys_device_blkno = ngfs_phys_device_blockno(fs, NGFS_ROOT_DATA_BLOCK);
+    // TODO: confirm throug testing that the cache api contract uses physical device block number instead of data block number
     result = cache_fetch(fs->cache, root_phys_device_blkno * NGFS_BLKSZ, 1, &blk);
     if (result < 0) {
         debug("cache_fetch() failed in ngfs_read_root_dir");
