@@ -238,8 +238,22 @@ void ngfs_listing_reclaim(struct io * lsio) {
     // YOUR CODE HERE
 }
 
+
 // INTERNAL FUNCTION DEFINITIONS
 //
+static uint32_t get_next_data_block(const struct ngfs_mount * fs, uint32_t cur_block) {
+    // YOUR CODE HERE
+    return 0;
+}
+static void set_next_data_block(const struct ngfs_mount * fs, uint32_t cur_block, uint32_t next_block) {
+    // YOUR CODE HERE
+}
+
+static uint32_t get_free_data_block(const struct ngfs_mount * fs) {
+    // YOUR CODE HERE
+    return 0;
+}
+
 static unsigned long ngfs_data_block_count(const struct ngfs_mount * fs) {
     // YOUR CODE HERE
     // Number of data blocks = total number of blocks - number of FAT blocks.
