@@ -13,6 +13,18 @@ struct filesystem; // extern decl.
 struct io; // extern decl.
 
 extern int mount_ngfs(const char * mpname, struct io * bkgio);
+extern int ngfs_open(struct filesystem * fs, const char * name, struct io ** ioptr);
+extern void ngfs_reclaim(struct io * io);
+extern long ngfs_fetch(struct io * io, unsigned long long pos, void * buf, long bufsz);
+extern long ngfs_read(struct io * io, void * buf, long bufsz);
+extern long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long len);
+extern long ngfs_write(struct io * io, const void * buf, long len);
+extern int ngfs_ioctl(struct io * io, int op, void * arg);
+extern int ngfs_create(struct filesystem * fs, const char * name);
+extern int ngfs_delete(struct filesystem * fs, const char * name);
+extern void ngfs_flush(struct filesystem * fs);
+extern long ngfs_listing_read(struct io * lsio, void * buf, long bufsz);
+extern void ngfs_listing_reclaim(struct io * lsio);
 
 // Mounts an instance of the Next Generation File System. Allows the filesys 
 // functions to access the files in /bkgio/ under the name /mpname/.
