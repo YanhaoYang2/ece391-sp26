@@ -27,35 +27,163 @@
 
 // INTERNAL TYPE DEFINITIONS
 //
+struct ngfs_mount {
+    struct filesystem base; // base filesystem object exposed to the fs manager
+    struct io * bkgio; // backing storage device for this mounted instance
+    struct cache * cache; // black cahce for the backing storage device
+    unsigned long long byte_capacity; // total device capacity in bytes
+    unsigned long total_blocks; // total number of NGFS blocks on the device
+    unsigned long fat_blocks; // number of blocks used for the FAT
+};
+
+struct ngfs_fileio {
+    struct io io;
+    struct ngfs_mount * fs;
+    struct ngfs_dir_entry dir;
+    unsigned long dir_index;
+    unsigned long long pos;
+};
+
+struct ngfs_listingio {
+    struct io io;
+    struct ngfs_mount * fs;
+    unsigned long next_index;
+};
 
 
 // INTERNAL FUNCTION DECLARATIONS
 //
-struct filesystem ngfs {
+// Add ngfs_mount parameter to all internal helper functions to keep track fo the mounted instance on which these functions are operating.
+static uint32_t get_next_data_block(const struct ngfs_mount * fs, uint32_t cur_block);
+static void set_next_data_block(const struct ngfs_mount * fs, uint32_t cur_block, uint32_t next_block);
+static uint32_t get_free_data_block(const struct ngfs_mount * fs);
 
-}
+static unsigned long ngfs_data_block_count(const struct ngfs_mount * fs);
+static unsigned long ngfs_phys_device_blockno(const struct ngfs_mount * fs, unsigned long data_blockno);
+static int ngfs_read_root_dir(struct ngfs_mount * fs, unsigned long index, struct ngfs_dir_entry * dir);
+static int ngfs_find_root_by_name(struct ngfs_mount * fs, const char * name, struct ngfs_dir_entry * dir, unsigned long * indexptr);
 
-struct iointf ngfs_file_intf {
-
-}
-
-struct iointf ngfs_listing_intf {
-    
-}
+static int ngfs_open_fileio(struct ngfs_mount * fs, const char * name, struct io ** ioptr);
+static int ngfs_open_lsio(struct ngfs_mount * fs, struct io ** ioptr);
 
 
 // INTERNAL GLOBAL VARIABLES
 //
+static struct filesystem ngfs = {
+    .implname = "ngfs",
+    .openfile = &ngfs_open,
+    .createfile = &ngfs_create,
+    .deletefile = &ngfs_delete,
+    .flush = &ngfs_flush
+};
 
+static struct iointf ngfs_file_intf = {
+    .implname = "ngfs_file",
+    .reclaim = &ngfs_reclaim,
+    .fetch = &ngfs_fetch,
+    .read = &ngfs_read,
+    .store = &ngfs_store,
+    .write = &ngfs_write,
+    .ioctl = &ngfs_ioctl
+};
 
-int mount_ngfs(const char * name, struct io * bkgio) {
+static struct iointf ngfs_listing_intf = {
+    .implname = "ngfs_listing",
+    .read = &ngfs_listing_read,
+    .reclaim = &ngfs_listing_reclaim
+};
+
+// EXPORTED FUNCTION DEFINITIONS
+//
+int mount_ngfs(const char * mpname, struct io * bkgio) {
     // YOUR CODE HERE
+    struct ngfs_mount * fs;
+    unsigned int blksz;
+    int result;
+
+    trace("%s(%s,%p)", __func__, mpname, bkgio);
+    
+    // Allocate and init the ngfs structure for the mounted instance
+    fs = kcalloc(1, sizeof(*fs));
+    if (fs == NULL)
+        return -ENOMEM;
+
+    // Deivce block size capacity checks.
+    blksz = ioblksz(bkgio);
+    assert (blksz > 0);
+
+    if (NGFS_BLKSZ % blksz != 0) {
+        debug("Incompatible device block size: %d", blksz);
+        kfree(fs);
+        return -ENOTSUP;
+    }
+
+    result = ioctl(bkgio, IOC_GETEND, &fs->byte_capacity);
+
+    if (result != 0) {
+        debug("ioctl(IOC_GETEND) returned %d", result);
+        kfree(fs);
+        return result;
+    }
+
+    if (fs->byte_capacity % NGFS_BLKSZ != 0) {
+        debug("Device capacity is not a multiple of NGFS block size");
+        kfree(fs);
+        return -EBADFMT;
+    }
+
+    fs->total_blocks = fs->byte_capacity / NGFS_BLKSZ;
+
+    if (fs->total_blocks == 0) {
+        debug("Device capacity is 0 for NGFS");
+        kfree(fs);
+        return -EBADFMT;
+    }
+
+    // FAT size must be large enough to hold one FAT entry for each data block.
+    // FAT blocks = ceil[total blocks / (ENTRIES_PER_BLOCK + 1)].
+    fs->fat_blocks = (fs->total_blocks + NGFS_FAT_ENTRIES_PER_BLOCK) / (NGFS_FAT_ENTRIES_PER_BLOCK + 1);
+
+    if (fs->fat_blocks >= fs->total_blocks) {
+        debug("Device capacity is too small for NGFS");
+        kfree(fs);
+        return -EBADFMT;
+    }
+
+    fs->cache = create_cache(bkgio, NGFS_BLKSZ);
+
+    if (fs->cache == NULL) {
+        debug("create_cache() failed");
+        kfree(fs);
+        return -ENOMEM;
+    }
+
+    fs->bkgio = ioaddref(bkgio);
+    fs->base = ngfs;
+
+    // Register the mounted filesystem instance
+    result = mount_filesys(mpname, &fs->base);
+    if (result < 0) {
+        iodropref(fs->bkgio);
+        kfree(fs);
+        return result;
+    }
+
     return 0;
 }
 
 int ngfs_open(struct filesystem * fs, const char * name, struct io ** ioptr) {
     // YOUR CODE HERE
-    return 0;
+    struct ngfs_mount * const ngfs = (void*)fs;
+    assert (fs != NULL);
+    assert (ioptr != NULL);
+
+    // Non-NULL and non-empty name goes to file interface,
+    // NULL or empty name goes to listing interface.
+    if (name != NULL && name[0] != '\0')
+        return ngfs_open_fileio(ngfs, name, ioptr);
+    else
+        return ngfs_open_lsio(ngfs, ioptr);
 }
 
 void ngfs_reclaim(struct io * io) {
@@ -108,4 +236,137 @@ long ngfs_listing_read(struct io * lsio, void * buf, long bufsz) {
 
 void ngfs_listing_reclaim(struct io * lsio) {
     // YOUR CODE HERE
+}
+
+// INTERNAL FUNCTION DEFINITIONS
+//
+static unsigned long ngfs_data_block_count(const struct ngfs_mount * fs) {
+    // YOUR CODE HERE
+    // Number of data blocks = total number of blocks - number of FAT blocks.
+    return fs->total_blocks - fs->fat_blocks;
+}
+
+static unsigned long ngfs_phys_device_blockno(const struct ngfs_mount * fs, unsigned long data_blockno) {
+    // YOUR CODE HERE
+    // Map NGFS block number to physical device block number
+    // Physical device block number = number of FAT blocks + data block number
+    return fs->fat_blocks + data_blockno;
+}
+
+static int ngfs_read_root_dir(struct ngfs_mount * fs, unsigned long index, struct ngfs_dir_entry * dir) {
+    // YOUR CODE HERE
+    void * blk;
+    struct ngfs_dir_entry * entry;
+    unsigned long root_phys_device_blkno;
+    int result;
+
+    if (fs == NULL || dir == NULL) {
+        debug("Invalid argument(s) to ngfs_read_root_dir");
+        return -EINVAL;
+    }
+
+    if (index >= NGFS_BLKSZ / NGFS_DENSZ) {
+        debug("Root directory index %lu out of bounds", index);
+        return -EINVAL;
+    }
+
+    // Convert root directory block number to physical device block number,
+    // then fectch root directory block from the cache. cache_fetch expects
+    // byte offset, so multiply block number by block size to get byte offset.
+    root_phys_device_blkno = ngfs_phys_device_blockno(fs, NGFS_ROOT_DATA_BLOCK);
+    result = cache_fetch(fs->cache, root_phys_device_blkno * NGFS_BLKSZ, 1, &blk);
+    if (result < 0) {
+        debug("cache_fetch() failed in ngfs_read_root_dir");
+        return result;
+    }
+
+    // Read indexed directory entry from the cached block.
+    entry = (struct ngfs_dir_entry *)blk;
+    *dir = entry[index];
+
+    cache_release(fs->cache, blk, 0); // release without marking dirty after a pure read access
+
+    return 0;
+}
+
+static int ngfs_find_root_by_name(struct ngfs_mount * fs, const char * name, struct ngfs_dir_entry * dir, unsigned long * indexptr) {
+    // YOUR CODE HERE
+    struct ngfs_dir_entry current_entry;
+    unsigned long i;
+    int result;
+
+    if (fs == NULL || name == NULL) {
+        debug("Invalid argument(s) to ngfs_find_root_by_name");
+        return -EINVAL;
+    }
+
+    for (i = 0; i < NGFS_BLKSZ / NGFS_DENSZ; i++) {
+        result = ngfs_read_root_dir(fs, i, &current_entry);
+        
+        if (result < 0) {
+            debug("ngfs_read_root_dir() failed in ngfs_find_root_by_name");
+            return result;
+        }
+
+        if (current_entry.name[0] == '\0') {
+            continue; // empty entry
+        }
+
+        if (strcmp(current_entry.name, name) == 0) {
+            if (dir != NULL) {
+                *dir = current_entry;
+            }
+            if (indexptr != NULL) {
+                *indexptr = i;
+            }
+            return 0; // found entry
+        }
+    }
+
+    return -ENOENT; // entry not found
+}
+
+static int ngfs_open_fileio(struct ngfs_mount * fs, const char * name, struct io ** ioptr) {
+    // YOUR CODE HERE
+    struct ngfs_fileio * fileio;
+    struct ngfs_dir_entry dir;
+    unsigned long dir_index;
+    int result;
+
+    // Look up requested file in the root directory
+    result = ngfs_find_root_by_name(fs, name, &dir, &dir_index);
+    if (result < 0) {
+        debug("ngfs_find_root_by_name() failed in ngfs_open_fileio");
+        return result;
+    }
+
+    fileio = kcalloc(1, sizeof(*fileio)); // allocate new object space for each open call
+    if (fileio == NULL) {
+        debug("kcalloc() failed in ngfs_open_fileio");
+        return -ENOMEM;
+    }
+
+    fileio->fs = fs;
+    fileio->dir = dir;
+    fileio->dir_index = dir_index;
+    fileio->pos = 0; // new file after openning start position placed at 0
+
+    *ioptr = ioinit(&fileio->io, &ngfs_file_intf, 1, 1);
+    return 0;
+}
+
+static int ngfs_open_lsio(struct ngfs_mount * fs, struct io ** ioptr) {
+    // YOUR CODE HERE
+    struct ngfs_listingio * lsio;
+    lsio = kcalloc(1, sizeof(*lsio));
+    if (lsio == NULL) {
+        debug("kcalloc() failed in ngfs_open_lsio");
+        return -ENOMEM;
+    }
+
+    lsio->fs = fs;
+    lsio->next_index = 0;
+
+    *ioptr = ioinit(&lsio->io, &ngfs_listing_intf, 1, 1); // init embedded io object to user NGFS listing interface
+    return 0;
 }

@@ -137,21 +137,21 @@ int cache_fetch(
         
 
     while(cache->bks[oldest_index].occupied==1){
-     condition_wait(&cache->bks[oldest_index].release);
+        condition_wait(&cache->bks[oldest_index].release);
     }
     // only acquire the block lock after it is not occupied by another thread
         rwlock_acquire(&cache->bks[oldest_index].blk_lock,1);
         rwlock_release(&cache->lock);
-     if(cache->bks[oldest_index].dirty==1){
+    if(cache->bks[oldest_index].dirty==1){
         memio_store(cache->cache_io,cache->bks[oldest_index].position,cache->bks[oldest_index].data,cache->blksz);
-     }
-      cache->bks[oldest_index].dirty=0;
-      cache->bks[oldest_index].occupied=1;
-        cache->bks[oldest_index].position=pos;
-        cache->bks[oldest_index].last_accessed= counter;
-            memio_fetch(cache->cache_io,pos,cache->bks[oldest_index].data,cache->blksz);
+    }
+    cache->bks[oldest_index].dirty=0;
+    cache->bks[oldest_index].occupied=1;
+    cache->bks[oldest_index].position=pos;
+    cache->bks[oldest_index].last_accessed= counter;
+    memio_fetch(cache->cache_io,pos,cache->bks[oldest_index].data,cache->blksz);
      
-            rwlock_release(&cache->bks[oldest_index].blk_lock);
+    rwlock_release(&cache->bks[oldest_index].blk_lock);
     return 0;
 }
 
