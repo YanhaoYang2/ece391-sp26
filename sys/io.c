@@ -459,6 +459,7 @@ int memio_ioctl(struct io * io, int op, void * arg) {
 
     switch (op) {
     case IOC_GETPOS:
+        return seekio_ioctl(io,op,arg);
     case IOC_SETPOS:
         return seekio_ioctl(io, op, arg);
     
