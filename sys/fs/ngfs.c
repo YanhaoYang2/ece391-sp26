@@ -508,14 +508,7 @@ int ngfs_ioctl(struct io * io, int op, void * arg) {
                 debug("Invalid argument(s) to ngfs_ioctl(IOC_GETEND)");
                 return -EINVAL;
             }
-            rwlock_acquire(&fileio->fs->file_locks[fileio->dir_index], 0);
-            result = ngfs_refresh_open_dir(fileio);
-            if (result < 0) {
-                rwlock_release(&fileio->fs->file_locks[fileio->dir_index]);
-                return result;
-            }
             *ullarg = fileio->dir.size;
-            rwlock_release(&fileio->fs->file_locks[fileio->dir_index]);
             return 0;
         
         case IOC_SETEND:
