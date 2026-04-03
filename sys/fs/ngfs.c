@@ -212,6 +212,37 @@ long ngfs_write(struct io * io, const void * buf, long len) {
 
 int ngfs_ioctl(struct io * io, int op, void * arg) {
     // YOUR CODE HERE
+    struct ngfs_fileio * const fileio = (struct ngfs_fileio *)io;
+    unsigned long long * const ullarg = (unsigned long long *)arg;
+
+    // TODO: Support more ioctls such as IOC_GETEND for file size, and IOC_SETEND for truncating/extending files.
+    switch (op) {
+        case IOC_GETPOS:
+            if (ullarg == NULL)
+                return -EINVAL;
+            *ullarg = fileio->pos;
+            return 0;
+
+        case IOC_SETPOS:
+            if (ullarg == NULL)
+                return -EINVAL;
+            if (*ullarg % io->blksz != 0)
+                return -EINVAL;
+            fileio->pos = *ullarg;
+            return 0;
+
+        case IOC_GETEND:
+            if (ullarg == NULL)
+                return -EINVAL;
+            *ullarg = fileio->dir.size;
+            return 0;
+        
+        case IOC_SETEND:
+            return -ENOTSUP;
+
+        default:
+            return -ENOTSUP;
+    }
     return 0;
 }
 
@@ -250,7 +281,7 @@ long ngfs_listing_read(struct io * lsio, void * buf, long bufsz) {
             return result;
         if (dir.name[0] == '\0')
             continue; // empty entry, skip
-        name_len = strnlen(dir.name, sizeok(dir.name));
+        name_len = strlen(dir.name);
         if (name_len < (size_t)bufsz) {
             copy_len = name_len;
         } else {
