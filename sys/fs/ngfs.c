@@ -456,7 +456,13 @@ int ngfs_delete(struct filesystem * fs, const char * name) {
 
 void ngfs_flush(struct filesystem * fs) {
     // YOUR CODE HERE
-    
+    struct ngfs_mount * const ngfs = (struct ngfs_mount *)fs;
+    if (ngfs == NULL) {
+        debug("Invalid argument(s) to ngfs_flush");
+        return;
+    }
+    // Flush the cache to ensure all dirty blocks are written back to the device
+    cache_flush(ngfs->cache);
 }
 
 long ngfs_listing_read(struct io * lsio, void * buf, long bufsz) {
@@ -534,12 +540,42 @@ static uint32_t get_next_data_block(const struct ngfs_mount * fs, uint32_t cur_b
 // Sets FAT[cur_block]= next_block
 static void set_next_data_block(const struct ngfs_mount * fs, uint32_t cur_block, uint32_t next_block) {
     // YOUR CODE HERE
+    void * blk;
+    struct ngfs_fat * fat_blk;
+    unsigned long fat_blk_index;
+    unsigned long fat_entry_index;
+    int result;
+
+    assert (fs != NULL);
+    assert (cur_block < ngfs_data_block_count(fs));
+    assert (next_block < NGFS_BLOCK_END);
+
+    fat_blk_index = cur_block / NGFS_FAT_ENTRIES_PER_BLOCK;
+    fat_entry_index = cur_block % NGFS_FAT_ENTRIES_PER_BLOCK;
+
+    result = cache_fetch(fs->cache, fat_blk_index * NGFS_BLKSZ, 1, &blk);
+    assert (result >= 0);
+
+    fat_blk = (struct ngfs_fat *) blk;
+    fat_blk->fat[fat_entry_index] = next_block;
+
+    cache_release(fs->cache, blk, 1); // mark dirty after modifying FAT entry
 }
 
 //Scans the FAT, returning the first entry where FAT[entry]= NGFS_BLOCK_FREE
 static uint32_t get_free_data_block(const struct ngfs_mount * fs) {
     // YOUR CODE HERE
-    return 0;
+    uint32_t block_no;
+    if (fs == NULL) {
+        debug("Invalid argument(s) to get_free_data_block");
+        return NGFS_BLOCK_END; // indicate failure with an invalid block number
+    }
+    for (block_no = NGFS_ROOT_DATA_BLOCK + 1; block_no < ngfs_data_block_count(fs); block_no++) {
+        if (get_next_data_block(fs, block_no) == NGFS_BLOCK_FREE) {
+            return block_no;
+        }
+    }
+    return NGFS_BLOCK_END; // no free block found
 }
 
 static unsigned long ngfs_data_block_count(const struct ngfs_mount * fs) {
