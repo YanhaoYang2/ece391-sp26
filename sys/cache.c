@@ -23,16 +23,17 @@
 #include "heap.h"
 #include "misc.h"
 #include "io.h"
-
 #include "console.h"
 
 // INTERNAL TYPE DEFINITIONS
 //
+// global counter for LRU. Larger the counter means this block is more recently accesed
 static uint64_t counter=0;
 struct blk {
      uint8_t* data ; 
     int dirty;
-    int occupied;
+    int occupied; //meaning if the block is a valid block
+    int refcnt;
     // this condition is to condition broad cast all other threads waiting on this block after it is freed
     struct condition release;
     // this rwlock if block level rwlock to reduce global competition for cache lock 
@@ -100,6 +101,7 @@ struct cache * create_cache(struct io * bkgio, unsigned long cache_blksz) {
     ca->cache_io=bkgio;
     //initialized blocks
     for(int i=0;i<num_blocks;i++){
+    ca->bks[i]->refcnt=0;
     ca->bks[i]->occupied=0;
     rwlock_init(&ca->bks[i]->blk_lock,"block_lock");
     condition_init(&ca->bks[i]->release,"wait_for_release");}
@@ -121,6 +123,7 @@ int cache_fetch(
             rwlock_release(&cache->lock);
             *pptr=cache->bks[i]->data;
             cache->bks[i]->last_accessed=counter;
+            cache->bks[i]->refcnt++;
             rwlock_release(&cache->bks[i]->blk_lock);
             return 0;
         }
@@ -130,7 +133,7 @@ int cache_fetch(
     int oldest_index=-1;
     for(int i=0;i<num_blocks;i++){
         // we find an unoccupied spot!
-        if(cache->bks[i]->occupied==0){
+        if(cache->bks[i]->refcnt==0){
              rwlock_acquire(&cache->bks[i]->blk_lock,1);
             rwlock_release(&cache->lock);
             if(cache->bks[i]->dirty==1){
@@ -141,9 +144,10 @@ int cache_fetch(
             cache->bks[i]->occupied=1;
             cache->bks[i]->position=pos;
             cache->bks[i]->last_accessed= counter;
+            *pptr=cache->bks[i]->data;
             iofetch(cache->cache_io,pos,cache->bks[i]->data,cache->blksz);
-            
-            // rwlock_release(&cache->bks[i].blk_lock);
+            cache->bks[i]->refcnt++;
+            rwlock_release(&cache->bks[i]->blk_lock);
             return 0;
                 }
         if(cache->bks[i]->last_accessed<oldest_unused){
@@ -154,7 +158,7 @@ int cache_fetch(
     }
         
 
-    while(cache->bks[oldest_index]->occupied==1){
+    while(cache->bks[oldest_index]->refcnt!=0){
      condition_wait(&cache->bks[oldest_index]->release);
     }
     // only acquire the block lock after it is not occupied by another thread
@@ -163,11 +167,12 @@ int cache_fetch(
      if(cache->bks[oldest_index]->dirty==1){
         iostore(cache->cache_io,cache->bks[oldest_index]->position,cache->bks[oldest_index]->data,cache->blksz);
      }
+       iofetch(cache->cache_io,pos,cache->bks[oldest_index]->data,cache->blksz);
       cache->bks[oldest_index]->dirty=0;
-      cache->bks[oldest_index]->occupied=1;
+      cache->bks[oldest_index]->occupied = 1; 
+      cache->bks[oldest_index]->refcnt++;
       cache->bks[oldest_index]->position=pos;
       cache->bks[oldest_index]->last_accessed= counter;
-      iofetch(cache->cache_io,pos,cache->bks[oldest_index]->data,cache->blksz);
       *pptr=cache->bks[oldest_index]->data;
       rwlock_release(&cache->bks[oldest_index]->blk_lock);
     return 0;
@@ -179,8 +184,8 @@ void cache_release(struct cache * cache, void * pblk, int dirty) {
     for (int i=0;i<num_blocks;i++){
        if(cache->bks[i]->data==pblk){
         rwlock_acquire(&cache->bks[i]->blk_lock,1);
-        cache->bks[i]->occupied=0;
-        cache->bks[i]->dirty=dirty;
+        cache->bks[i]->refcnt--;
+        cache->bks[i]->dirty|=dirty;
         condition_broadcast(&cache->bks[i]->release);
          rwlock_release(&cache->bks[i]->blk_lock);
        }
@@ -194,7 +199,7 @@ int cache_flush(struct cache * cache) {
     for(int i=0;i<num_blocks;i++){
         // prevent dirty changed by other threads between dirty check and memio store
         rwlock_acquire(&cache->bks[i]->blk_lock,1);
-        if(cache->bks[i]->dirty==1&& cache->bks[i]->occupied==0){
+        if(cache->bks[i]->dirty==1&& cache->bks[i]->refcnt==0){
              iostore(cache->cache_io,cache->bks[i]->position,cache->bks[i]->data,cache->blksz);
              cache->bks[i]->dirty=0;
         }
