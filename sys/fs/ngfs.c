@@ -236,7 +236,7 @@ long ngfs_fetch(struct io * io, unsigned long long pos, void * buf, long bufsz) 
     }
 
     if (fileio->dir.size - pos < (unsigned long long)bufsz) {
-        // dynamically adjust the bufsz to prevent reading past EOF
+        // dynamically adjust the bufsz to prevent writing past EOF
         bufsz = fileio->dir.size - pos;
     }
 
@@ -299,7 +299,92 @@ long ngfs_read(struct io * io, void * buf, long bufsz) {
 
 long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long len) {
     // YOUR CODE HERE
-    return 0;
+    struct ngfs_fileio * const fileio=(struct ngfs_fileio *)io;
+    struct ngfs_mount *const fs=fileio->fs;
+    unsigned long file_block_index;
+    unsigned long block_offset;
+    unsigned long phys_block_no;
+    unsigned long i;
+    long retlen;
+    uint32_t curr_block;
+    size_t copy_len;
+    const char* bufp;
+    void* blk;
+    if (io == NULL || (buf == NULL && len != 0)) {
+        return -EINVAL;
+    }
+
+    if (buf == NULL || len == 0) {
+        return 0;
+    }
+
+    rwlock_acquire(&fs->file_locks[fileio->dir_index], 1); // acquire exclusive access lock for store
+    if (pos > fileio->dir.size) {
+        // start position beyond EOF
+        retlen = -EINVAL;
+        goto out_unlock;
+    }
+
+    if (pos == fileio->dir.size) {
+        // start position at EOF, return 0
+        retlen = 0;
+        goto out_unlock;
+    }
+
+    if (fileio->dir.size - pos < (unsigned long long)len) {
+        // dynamically adjust the len to prevent reading past EOF
+        len = fileio->dir.size - pos;
+    }
+
+    file_block_index = pos / NGFS_BLKSZ;
+    block_offset = pos % NGFS_BLKSZ;
+
+    curr_block = fileio->dir.start_block;
+
+    for (i = 0; i < file_block_index; i++) {
+        curr_block = get_next_data_block(fs, curr_block);
+        if (curr_block == NGFS_BLOCK_END) {
+            // early end in FAT chain, indicating a on-disk metadata inconsistency
+            retlen = -EIO;
+            goto out_unlock;
+        }
+    }
+
+    bufp = (char *)buf;
+    while (len > 0) {
+        phys_block_no = ngfs_phys_device_blockno(fs, curr_block); // map NGFS block No. to physical device block No.
+        if (cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk) < 0) {
+            retlen = -EIO;
+            goto out_unlock;
+        }
+
+        if (NGFS_BLKSZ - block_offset < (unsigned long)len) {
+            copy_len = NGFS_BLKSZ - block_offset;
+        } else {
+            copy_len = len;
+        }
+
+        memcpy((char *)blk + block_offset, bufp, copy_len);
+        cache_release(fs->cache, blk, 1); // release after write access, mark dirty
+        
+        len -= copy_len;
+        bufp += copy_len;
+        block_offset = 0; // only first block can have a non-zero offset
+
+        if (len > 0) {
+            curr_block = get_next_data_block(fs, curr_block);
+            if (curr_block == NGFS_BLOCK_END) {
+                // early end in FAT chain, indicating an on-disk metadata inconsistency
+                retlen = -EIO;
+                goto out_unlock;
+            }
+        }
+    }
+
+    retlen = bufp - (const char *)buf; // total bytes written
+out_unlock:
+    rwlock_release(&fs->file_locks[fileio->dir_index]);
+    return retlen;
 }
 
 long ngfs_write(struct io * io, const void * buf, long len) {
