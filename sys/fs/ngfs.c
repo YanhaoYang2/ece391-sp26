@@ -237,11 +237,6 @@ long ngfs_fetch(struct io * io, unsigned long long pos, void * buf, long bufsz) 
     }
 
     rwlock_acquire(&fs->file_locks[fileio->dir_index], 0); // acquire shared access lock
-    result = ngfs_refresh_open_dir(fileio);
-    if (result < 0) {
-        retlen = result;
-        goto out_unlock;
-    }
 
     if (pos > fileio->dir.size) {
         // start position beyond EOF
@@ -353,11 +348,6 @@ long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long l
     }
 
     rwlock_acquire(&fs->file_locks[fileio->dir_index], 1); // acquire exclusive access lock for store
-    result = ngfs_refresh_open_dir(fileio);
-    if (result < 0) {
-        retlen = result;
-        goto out_unlock;
-    }
     if (pos > fileio->dir.size) {
         // start position beyond EOF
         retlen = -EINVAL;
@@ -443,12 +433,6 @@ long ngfs_write(struct io * io, const void * buf, long len) {
     }
 
     rwlock_acquire(&fs->file_locks[fileio->dir_index], 1); // acquire exclusive access lock for write
-
-    result = ngfs_refresh_open_dir(fileio);
-    if (result < 0) {
-        retlen = result;
-        goto out_unlock;
-    }
 
     end_pos = fileio->pos + (unsigned long long)len;
 
@@ -1075,9 +1059,9 @@ static int ngfs_extend_file(struct ngfs_fileio * fileio, unsigned long long new_
             chunk_size = (long)remaining_zero_bytes;
         }
         result = ngfs_store(&fileio->io, zero_pos, zero_buf, chunk_size);
-        if (result < 0) {
+        if (result <= 0) {
             debug("ngfs_store() failed in ngfs_extend_file while zero-filling new blocks");
-            return result;
+            return result < 0 ? result : -EIO;
         }
         zero_pos += result;
         remaining_zero_bytes -= result;
