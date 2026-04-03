@@ -62,12 +62,12 @@ struct cache * create_cache(struct io * bkgio, unsigned long cache_blksz) {
     // YOUR CODE HERE
 
     struct cache* ca=kmalloc(sizeof(*ca));
-    if(ca==NULL) return -ENOMEM; 
+    if(ca==NULL) return NULL; 
       memset(ca,0, sizeof(*ca));
     ca->bks=kmalloc(sizeof(struct blk*)*num_blocks);
     if(ca->bks==NULL) {
         kfree(ca);
-        return -ENOMEM;
+        return NULL;
     }
   
 
@@ -79,7 +79,7 @@ struct cache * create_cache(struct io * bkgio, unsigned long cache_blksz) {
             }
             kfree(ca->bks);
             kfree(ca);
-            return -ENOMEM;
+            return NULL ;
         }
         memset(ca->bks[i], 0, sizeof(struct blk));
         
@@ -92,7 +92,7 @@ struct cache * create_cache(struct io * bkgio, unsigned long cache_blksz) {
             }
             kfree(ca->bks);
             kfree(ca);
-            return -ENOMEM;
+            return NULL;
         }
     }
     rwlock_init(&ca->lock,"cache_rwlock");
