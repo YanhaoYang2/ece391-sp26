@@ -73,6 +73,8 @@ static int ngfs_update_root_dir_entry(struct ngfs_mount * fs, unsigned long inde
 static int ngfs_extend_file(struct ngfs_fileio * fileio, unsigned long long new_end);
 static int ngfs_truncate_file(struct ngfs_fileio * fileio, unsigned long long new_end);
 
+static int ngfs_refresh_open_dir(struct ngfs_fileio * fileio);
+
 // INTERNAL GLOBAL VARIABLES
 //
 static struct filesystem ngfs = {
@@ -235,6 +237,11 @@ long ngfs_fetch(struct io * io, unsigned long long pos, void * buf, long bufsz) 
     }
 
     rwlock_acquire(&fs->file_locks[fileio->dir_index], 0); // acquire shared access lock
+    result = ngfs_refresh_open_dir(fileio);
+    if (result < 0) {
+        retlen = result;
+        goto out_unlock;
+    }
 
     if (pos > fileio->dir.size) {
         // start position beyond EOF
@@ -309,12 +316,12 @@ out_unlock:
 long ngfs_read(struct io * io, void * buf, long bufsz) {
     // YOUR CODE HERE
     // TODO: if read() is called by multiple threads, may need to serialize the file pos var with locks as it might be updated by multiple threads.
-    struct ngfs_fileio * fileio;
-    long retlen;
     if (io == NULL || (buf == NULL && bufsz != 0)) {
         return -EINVAL;
     }
-    fileio = (struct ngfs_fileio *)io;
+
+    struct ngfs_fileio * const fileio = (struct ngfs_fileio *)io;
+    long retlen;
     retlen = ngfs_fetch(io, fileio->pos, buf, bufsz);
     if (retlen > 0) {
         fileio->pos += retlen; // update file position after a successful read
@@ -335,6 +342,8 @@ long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long l
     size_t copy_len;
     const char* bufp;
     void* blk;
+    int result;
+
     if (io == NULL || (buf == NULL && len != 0)) {
         return -EINVAL;
     }
@@ -344,6 +353,11 @@ long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long l
     }
 
     rwlock_acquire(&fs->file_locks[fileio->dir_index], 1); // acquire exclusive access lock for store
+    result = ngfs_refresh_open_dir(fileio);
+    if (result < 0) {
+        retlen = result;
+        goto out_unlock;
+    }
     if (pos > fileio->dir.size) {
         // start position beyond EOF
         retlen = -EINVAL;
@@ -430,6 +444,12 @@ long ngfs_write(struct io * io, const void * buf, long len) {
 
     rwlock_acquire(&fs->file_locks[fileio->dir_index], 1); // acquire exclusive access lock for write
 
+    result = ngfs_refresh_open_dir(fileio);
+    if (result < 0) {
+        retlen = result;
+        goto out_unlock;
+    }
+
     end_pos = fileio->pos + (unsigned long long)len;
 
     if (end_pos > fileio->dir.size) {
@@ -488,7 +508,14 @@ int ngfs_ioctl(struct io * io, int op, void * arg) {
                 debug("Invalid argument(s) to ngfs_ioctl(IOC_GETEND)");
                 return -EINVAL;
             }
+            rwlock_acquire(&fileio->fs->file_locks[fileio->dir_index], 0);
+            result = ngfs_refresh_open_dir(fileio);
+            if (result < 0) {
+                rwlock_release(&fileio->fs->file_locks[fileio->dir_index]);
+                return result;
+            }
             *ullarg = fileio->dir.size;
+            rwlock_release(&fileio->fs->file_locks[fileio->dir_index]);
             return 0;
         
         case IOC_SETEND:
@@ -499,6 +526,11 @@ int ngfs_ioctl(struct io * io, int op, void * arg) {
             new_end = *ullarg;
 
             rwlock_acquire(&fileio->fs->file_locks[fileio->dir_index], 1); // acquire exclusive access lock for truncate/extend operations
+            result = ngfs_refresh_open_dir(fileio);
+            if (result < 0) {
+                rwlock_release(&fileio->fs->file_locks[fileio->dir_index]);
+                return result;
+            }
 
             if (new_end == fileio->dir.size) {
                 // new end is the same as current size, skip
@@ -700,6 +732,9 @@ long ngfs_listing_read(struct io * lsio, void * buf, long bufsz) {
         }
 
         memcpy(buf, dir.name, copy_len);
+        if (copy_len < (size_t)bufsz) {
+            ((char *)buf)[copy_len] = '\0';
+        }
         listingio->next_index = i + 1; // update next index for next call
         return copy_len;
     }
@@ -777,7 +812,7 @@ static uint32_t get_free_data_block(const struct ngfs_mount * fs) {
     // YOUR CODE HERE
     uint32_t block_no;
     if (fs == NULL) {
-        debug("Invalid argument(s) to get_free_data_block");
+        debug("Invalid argument to get_free_data_block");
         return NGFS_BLOCK_END; // indicate failure with an invalid block number
     }
     for (block_no = NGFS_ROOT_DATA_BLOCK + 1; block_no < ngfs_data_block_count(fs); block_no++) {
@@ -809,7 +844,7 @@ static int ngfs_read_root_dir(struct ngfs_mount * fs, unsigned long index, struc
     int result;
 
     if (fs == NULL || dir == NULL) {
-        debug("Invalid argument(s) to ngfs_read_root_dir");
+        debug("Invalid argument to ngfs_read_root_dir");
         return -EINVAL;
     }
 
@@ -845,7 +880,7 @@ static int ngfs_find_root_by_name(struct ngfs_mount * fs, const char * name, str
     int result;
 
     if (fs == NULL || name == NULL) {
-        debug("Invalid argument(s) to ngfs_find_root_by_name");
+        debug("Invalid argument to ngfs_find_root_by_name");
         return -EINVAL;
     }
 
@@ -928,7 +963,7 @@ static int ngfs_update_root_dir_entry(struct ngfs_mount * fs, unsigned long inde
     int result;
 
     if (fs == NULL || dir == NULL) {
-        debug("Invalid argument(s) to ngfs_update_root_dir_entry");
+        debug("Invalid argument to ngfs_update_root_dir_entry");
         return -EINVAL;
     }
 
@@ -969,7 +1004,7 @@ static int ngfs_extend_file(struct ngfs_fileio * fileio, unsigned long long new_
     long chunk_size;
 
     if (fileio == NULL) {
-        debug("Invalid argument(s) to ngfs_extend_file");
+        debug("Invalid argument to ngfs_extend_file");
         return -EINVAL;
     }
 
@@ -978,7 +1013,7 @@ static int ngfs_extend_file(struct ngfs_fileio * fileio, unsigned long long new_
 
     if (new_end <= old_size) {
         // new end is not beyond current file size, incorrect call to this helper
-        debug("Invalid argument(s) to ngfs_extend_file");
+        debug("Invalid argument to ngfs_extend_file");
         return -EINVAL;
     }
 
@@ -1086,7 +1121,7 @@ static int ngfs_truncate_file(struct ngfs_fileio * fileio, unsigned long long ne
 
     if (new_end >= old_size) {
         // new end is larger or equal to current file size, incorrect call to this helper
-        debug("Invalid argument(s) to ngfs_truncate_file");
+        debug("Invalid argument to ngfs_truncate_file");
         return -EINVAL;
     }
 
@@ -1146,4 +1181,13 @@ static int ngfs_truncate_file(struct ngfs_fileio * fileio, unsigned long long ne
     }
 
     return 0;
+}
+
+static int ngfs_refresh_open_dir(struct ngfs_fileio * fileio) {
+    if (fileio == NULL) {
+        debug("Invalid argument to ngfs_refresh_open_dir");
+        return -EINVAL;
+    }
+
+    return ngfs_read_root_dir(fileio->fs, fileio->dir_index, &fileio->dir);
 }
