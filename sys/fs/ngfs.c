@@ -68,6 +68,9 @@ static int ngfs_find_root_by_name(struct ngfs_mount * fs, const char * name, str
 static int ngfs_open_fileio(struct ngfs_mount * fs, const char * name, struct io ** ioptr);
 static int ngfs_open_lsio(struct ngfs_mount * fs, struct io ** ioptr);
 
+static int ngfs_update_root_dir_entry(struct ngfs_mount * fs, unsigned long index, const struct ngfs_dir_entry * dir);
+static int ngfs_extend_file(struct ngfs_fileio * fileio, unsigned long long new_end);
+static int ngfs_truncate_file(struct ngfs_fileio * fileio, unsigned long long new_end);
 
 // INTERNAL GLOBAL VARIABLES
 //
@@ -408,40 +411,68 @@ int ngfs_ioctl(struct io * io, int op, void * arg) {
     // YOUR CODE HERE
     struct ngfs_fileio * const fileio = (struct ngfs_fileio *)io;
     unsigned long long * const ullarg = (unsigned long long *)arg;
+    unsigned long long new_end;
+    int result;
 
     if (io == NULL) {
         return -EINVAL;
      }
 
-    // TODO: Support more ioctls such as IOC_GETEND for file size, and IOC_SETEND for truncating/extending files.
     switch (op) {
         case IOC_GETPOS:
-            if (ullarg == NULL)
+            if (ullarg == NULL) {
+                debug("Invalid argument(s) to ngfs_ioctl(IOC_GETPOS)");
                 return -EINVAL;
+            }
             *ullarg = fileio->pos;
             return 0;
 
         case IOC_SETPOS:
-            if (ullarg == NULL)
+            if (ullarg == NULL) {
+                debug("Invalid argument(s) to ngfs_ioctl(IOC_SETPOS)");
                 return -EINVAL;
-            if (*ullarg % io->blksz != 0)
+            }
+            if (*ullarg % io->blksz != 0) {
+                debug("Invalid argument(s) to ngfs_ioctl(IOC_SETPOS)");
                 return -EINVAL;
+            }
             fileio->pos = *ullarg;
             return 0;
 
         case IOC_GETEND:
-            if (ullarg == NULL)
+            if (ullarg == NULL) {
+                debug("Invalid argument(s) to ngfs_ioctl(IOC_GETEND)");
                 return -EINVAL;
+            }
             *ullarg = fileio->dir.size;
             return 0;
         
         case IOC_SETEND:
-            return -ENOTSUP;
+            if (ullarg == NULL) {
+                debug("Invalid argument(s) to ngfs_ioctl(IOC_SETEND)");
+                return -EINVAL;
+            }
+            new_end = *ullarg;
+
+            rwlock_acquire(&fileio->fs->file_locks[fileio->dir_index], 1); // acquire exclusive access lock for truncate/extend operations
+
+            if (new_end == fileio->dir.size) {
+                // new end is the same as current size, skip
+                result = 0;
+            } else if (new_end > fileio->dir.size) {
+                // new end is larger than current size, extend called
+                result = ngfs_extend_file(fileio, new_end);
+            } else {
+                // new end is smaller than current size, truncate called
+                result = ngfs_truncate_file(fileio, new_end);
+            }
+
+            rwlock_release(&fileio->fs->file_locks[fileio->dir_index]);
+            return result;
 
         default:
             return -ENOTSUP;
     }
-    return 0;
 }
 
 int ngfs_create(struct filesystem * fs, const char * name) {
@@ -707,5 +738,228 @@ static int ngfs_open_lsio(struct ngfs_mount * fs, struct io ** ioptr) {
     lsio->next_index = 0;
 
     *ioptr = ioinit(&lsio->io, &ngfs_listing_intf, 1, 1); // init embedded io object to user NGFS listing interface
+    return 0;
+}
+
+static int ngfs_update_root_dir_entry(struct ngfs_mount * fs, unsigned long index, const struct ngfs_dir_entry * dir) {
+    // YOUR CODE HERE
+    void * blk;
+    struct ngfs_dir_entry * entry;
+    unsigned long root_phys_device_blkno;
+    int result;
+
+    if (fs == NULL || dir == NULL) {
+        debug("Invalid argument(s) to ngfs_update_root_dir_entry");
+        return -EINVAL;
+    }
+
+    if (index >= NGFS_BLKSZ / NGFS_DENSZ) {
+        debug("Root directory index %lu out of bounds", index);
+        return -EINVAL;
+    }
+
+    root_phys_device_blkno = ngfs_phys_device_blockno(fs, NGFS_ROOT_DATA_BLOCK);
+    result = cache_fetch(fs->cache, root_phys_device_blkno * NGFS_BLKSZ, 1, &blk);
+    if (result < 0) {
+        debug("cache_fetch() failed in ngfs_update_root_dir_entry");
+        return result;
+    }
+
+    entry = (struct ngfs_dir_entry *)blk;
+    entry[index] = *dir; // update indexed directory entry with new content
+    cache_release(fs->cache, blk, 1); // release and mark dirty after modifying the cached block
+
+    return 0;
+}
+
+static int ngfs_extend_file(struct ngfs_fileio * fileio, unsigned long long new_end) {
+    // YOUR CODE HERE
+    struct ngfs_mount * fs;
+    unsigned long long old_size;
+    unsigned long old_block_count;
+    unsigned long new_blocks_count;
+    uint32_t prev_block;
+    uint32_t curr_block;
+    uint32_t new_block;
+    unsigned long i;
+    int result;
+    char zero_buf[NGFS_BLKSZ];
+
+    unsigned long long zero_pos;
+    unsigned long long remaining_zero_bytes;
+    long chunk_size;
+
+    if (fileio == NULL) {
+        debug("Invalid argument(s) to ngfs_extend_file");
+        return -EINVAL;
+    }
+
+    fs = fileio->fs;
+    old_size = fileio->dir.size;
+
+    if (new_end <= old_size) {
+        // new end is not beyond current file size, incorrect call to this helper
+        debug("Invalid argument(s) to ngfs_extend_file");
+        return -EINVAL;
+    }
+
+    memset(zero_buf, 0, sizeof(zero_buf));
+    // count blocks
+    if (old_size == 0) {
+        old_block_count = 0;
+    } else {
+        old_block_count = (old_size - 1) / NGFS_BLKSZ + 1; // number of blocks currently occupied by the file
+    }
+    if (new_end == 0) {
+        new_blocks_count = 0;
+    } else {
+        new_blocks_count = (new_end - 1) / NGFS_BLKSZ + 1; // number of blocks needed for the new file size
+    }
+
+    if (new_blocks_count > old_block_count) {
+        if (old_block_count == 0) {
+            new_block = get_free_data_block(fs);
+            if (new_block == NGFS_BLOCK_END) {
+                debug("No free data block available in ngfs_extend_file");
+                return -ENOMEM;
+            }
+            set_next_data_block(fs, new_block, NGFS_BLOCK_END);
+            fileio->dir.start_block = new_block;
+            prev_block = new_block;
+            for (i = 1; i < new_blocks_count; i++) {
+                new_block = get_free_data_block(fs);
+                if (new_block == NGFS_BLOCK_END) {
+                    debug("No free data block available in ngfs_extend_file");
+                    return -ENOMEM;
+                }
+                set_next_data_block(fs, new_block, NGFS_BLOCK_END);
+                set_next_data_block(fs, prev_block, new_block);
+                prev_block = new_block;
+            }
+        } else {
+            // find the last block in FAt and append new blocks to it
+            curr_block = fileio->dir.start_block;
+            for (i = 1; i < old_block_count; i++) {
+                curr_block = get_next_data_block(fs, curr_block);
+            }
+            prev_block = curr_block;
+            for (i = old_block_count; i < new_blocks_count; i++) {
+                new_block = get_free_data_block(fs);
+                if (new_block == NGFS_BLOCK_END) {
+                    debug("No free data block available in ngfs_extend_file");
+                    return -ENOMEM;
+                }
+                set_next_data_block(fs, new_block, NGFS_BLOCK_END);
+                set_next_data_block(fs, prev_block, new_block);
+                prev_block = new_block;
+            }
+        }
+    }
+
+    // zero fill the newly allocated blocks
+    fileio->dir.size = new_end;
+    zero_pos = old_size;
+    remaining_zero_bytes = new_end - old_size;
+    chunk_size = 0;
+    while (remaining_zero_bytes > 0) {
+        if (remaining_zero_bytes > NGFS_BLKSZ) {
+            chunk_size = NGFS_BLKSZ;
+        } else {
+            chunk_size = (long)remaining_zero_bytes;
+        }
+        result = ngfs_store(&fileio->io, zero_pos, zero_buf, chunk_size);
+        if (result < 0) {
+            debug("ngfs_store() failed in ngfs_extend_file while zero-filling new blocks");
+            return result;
+        }
+        zero_pos += result;
+        remaining_zero_bytes -= result;
+    }
+
+    result = ngfs_update_root_dir_entry(fs, fileio->dir_index, &fileio->dir);
+    if (result < 0) {
+        debug("ngfs_update_root_dir_entry() failed in ngfs_extend_file after updating file size in directory entry");
+        return result;
+    }
+
+    return 0;
+}
+
+static int ngfs_truncate_file(struct ngfs_fileio * fileio, unsigned long long new_end) {
+    // YOUR CODE HERE
+    struct ngfs_mount * fs;
+    unsigned long long old_size;
+    unsigned long old_block_count;
+    unsigned long new_block_count;
+    uint32_t curr_block;
+    uint32_t next_block;
+    uint32_t free_block;
+    unsigned long i;
+    int result;
+
+    if (fileio == NULL) {
+        debug("Invalid argument(s) to ngfs_truncate_file");
+        return -EINVAL;
+    }
+
+    fs = fileio->fs;
+    old_size = fileio->dir.size;
+
+    if (new_end >= old_size) {
+        // new end is larger or equal to current file size, incorrect call to this helper
+        debug("Invalid argument(s) to ngfs_truncate_file");
+        return -EINVAL;
+    }
+
+    // count blocks
+    if (old_size == 0) {
+        old_block_count = 0;
+    } else {
+        old_block_count = (old_size - 1) / NGFS_BLKSZ + 1;
+    }
+    if (new_end == 0) {
+        new_block_count = 0;
+    } else {
+        new_block_count = (new_end - 1) / NGFS_BLKSZ + 1;
+    }
+
+    if (new_block_count == old_block_count) {
+        fileio->dir.size = new_end;
+    } else {
+        if (new_block_count == 0) {
+            curr_block = fileio->dir.start_block;
+            while (curr_block != NGFS_BLOCK_END) {
+                next_block = get_next_data_block(fs, curr_block);
+                set_next_data_block(fs, curr_block, NGFS_BLOCK_FREE);
+                curr_block = next_block;
+            }
+            fileio->dir.start_block = NGFS_BLOCK_END;
+            fileio->dir.size = 0;
+        } else {
+            curr_block = fileio->dir.start_block;
+            for (i = 1; i < new_block_count; i++) {
+                curr_block = get_next_data_block(fs, curr_block);
+            }
+            free_block = get_next_data_block(fs, curr_block);
+            set_next_data_block(fs, curr_block, NGFS_BLOCK_END); // mark new end of FAT chain
+            while (free_block != NGFS_BLOCK_END) {
+                next_block = get_next_data_block(fs, free_block);
+                set_next_data_block(fs, free_block, NGFS_BLOCK_FREE);
+                free_block = next_block;
+            }
+            fileio->dir.size = new_end;
+        }
+    }
+
+    if (fileio->pos > new_end) {
+        fileio->pos = new_end; // move file position back to new end if it is currently beyond new end after truncation
+    }
+
+    result = ngfs_update_root_dir_entry(fs, fileio->dir_index, &fileio->dir);
+    if (result < 0) {
+        debug("ngfs_update_root_dir_entry() failed in ngfs_truncate_file after updating file size in directory entry");
+        return result;
+    }
+
     return 0;
 }
