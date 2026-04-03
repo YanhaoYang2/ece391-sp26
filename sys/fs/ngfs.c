@@ -11,7 +11,7 @@
 #ifdef NGFS_DEBUG
 #define DEBUG
 #endif
-#define ull unsigned long long
+
 #include "ngfs.h"
 
 #include "../cache.h"
@@ -325,7 +325,6 @@ long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long l
     size_t copy_len;
     const char* bufp;
     void* blk;
-    int result;
     if (io == NULL || (buf == NULL && len != 0)) {
         return -EINVAL;
     }
@@ -348,7 +347,7 @@ long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long l
     }
 
     if (fileio->dir.size - pos < (unsigned long long)len) {
-        // dynamically adjust the len to prevent writing past EOF
+        // dynamically adjust the len to prevent reading past EOF
         len = fileio->dir.size - pos;
     }
 
@@ -369,9 +368,8 @@ long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long l
     bufp = (char *)buf;
     while (len > 0) {
         phys_block_no = ngfs_phys_device_blockno(fs, curr_block); // map NGFS block No. to physical device block No.
-        result = cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk);
-        if (result < 0) {
-            retlen = result;
+        if (cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk) < 0) {
+            retlen = -EIO;
             goto out_unlock;
         }
 
@@ -406,8 +404,41 @@ out_unlock:
 
 long ngfs_write(struct io * io, const void * buf, long len) {
     // YOUR CODE HERE
-<<<<<<< HEAD
-    return 0;
+    struct ngfs_fileio * const fileio = (struct ngfs_fileio *)io;
+    struct ngfs_mount * const fs = fileio->fs;
+    unsigned long long end_pos;
+    long retlen;
+    int result;
+
+    if (io == NULL || (buf == NULL && len != 0)) {
+        return -EINVAL;
+    }
+
+    if (buf == NULL || len == 0) {
+        return 0;
+    }
+
+    rwlock_acquire(&fs->file_locks[fileio->dir_index], 1); // acquire exclusive access lock for write
+
+    end_pos = fileio->pos + (unsigned long long)len;
+
+    if (end_pos > fileio->dir.size) {
+        // need to extend the file if end position is beyond current file size
+        result = ngfs_extend_file(fileio, end_pos);
+        if (result < 0) {
+            retlen = result;
+            goto out_unlock;
+        }
+    }
+
+    retlen = ngfs_store(io, fileio->pos, buf, len);
+    if (retlen > 0) {
+        fileio->pos += retlen; // update file position after a successful write
+    }
+
+out_unlock:
+    rwlock_release(&fs->file_locks[fileio->dir_index]);
+    return retlen;
 }
 
 int ngfs_ioctl(struct io * io, int op, void * arg) {
@@ -476,8 +507,6 @@ int ngfs_ioctl(struct io * io, int op, void * arg) {
         default:
             return -ENOTSUP;
     }
-=======
->>>>>>> 23d965da3d25f0dfa2654029fcd935b2f0b9dfd5
 }
 
 int ngfs_create(struct filesystem * fs, const char * name) {
@@ -944,6 +973,11 @@ static int ngfs_truncate_file(struct ngfs_fileio * fileio, unsigned long long ne
             curr_block = fileio->dir.start_block;
             for (i = 1; i < new_block_count; i++) {
                 curr_block = get_next_data_block(fs, curr_block);
+                if (curr_block == NGFS_BLOCK_END) {
+                    // early end in FAT chain - on-disk metadata inconsistency
+                    debug("Early end in FAT chain found in ngfs_truncate_file");
+                    return -EIO;
+                }
             }
             free_block = get_next_data_block(fs, curr_block);
             set_next_data_block(fs, curr_block, NGFS_BLOCK_END); // mark new end of FAT chain
