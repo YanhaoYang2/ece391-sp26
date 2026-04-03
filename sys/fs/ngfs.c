@@ -324,6 +324,10 @@ int ngfs_ioctl(struct io * io, int op, void * arg) {
     struct ngfs_fileio * const fileio = (struct ngfs_fileio *)io;
     unsigned long long * const ullarg = (unsigned long long *)arg;
 
+    if (io == NULL) {
+        return -EINVAL;
+     }
+
     // TODO: Support more ioctls such as IOC_GETEND for file size, and IOC_SETEND for truncating/extending files.
     switch (op) {
         case IOC_GETPOS:
