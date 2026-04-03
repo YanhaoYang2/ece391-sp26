@@ -36,6 +36,7 @@ struct ngfs_mount {
     unsigned long fat_blocks; // number of blocks used for the FAT
 
     struct rwlock file_locks[NGFS_BLKSZ / NGFS_DENSZ]; // dir lock, allow concurrent reads and exlusive writes of the same file
+    struct rwlock dir_lock; // lock for concurrent access to the root directory entries
 };
 
 struct ngfs_fileio {
@@ -171,6 +172,8 @@ int mount_ngfs(const char * mpname, struct io * bkgio) {
         rwlock_init(&fs->file_locks[i], "ngfs.file");
     }
 
+    rwlock_init(&fs->dir_lock, "ngfs.dir");
+
     fs->base = ngfs;
 
     // Register the mounted filesystem instance
@@ -200,6 +203,12 @@ int ngfs_open(struct filesystem * fs, const char * name, struct io ** ioptr) {
 
 void ngfs_reclaim(struct io * io) {
     // YOUR CODE HERE
+    struct ngfs_fileio * const fileio = (struct ngfs_fileio *)io;
+    if (fileio == NULL) {
+        debug("Invalid argument(s) to ngfs_reclaim");
+        return;
+    }
+    kfree(fileio);
 }
 
 long ngfs_fetch(struct io * io, unsigned long long pos, void * buf, long bufsz) {
@@ -511,12 +520,140 @@ int ngfs_ioctl(struct io * io, int op, void * arg) {
 
 int ngfs_create(struct filesystem * fs, const char * name) {
     // YOUR CODE HERE
-    return 0;
+    struct ngfs_mount * const ngfs = (struct ngfs_mount *)fs;
+    struct ngfs_dir_entry dir;
+    unsigned long i;
+    int result;
+
+    if (fs == NULL || name == NULL) {
+        debug("Invalid argument(s) to ngfs_create");
+        return -EINVAL;
+    }
+
+    if (name[0] == '\0') {
+        debug("Invalid argument(s) to ngfs_create: empty file name");
+        return -EINVAL;
+    }
+
+    if (strlen(name) > NGFS_MAX_FILENAME_LEN) {
+        debug("Invalid argument(s) to ngfs_create: file name too long");
+        return -EINVAL;
+    }
+
+    rwlock_acquire(&ngfs->dir_lock, 1);
+
+    result = ngfs_find_root_by_name(ngfs, name, NULL, NULL);
+    if (result == 0) {
+        rwlock_release(&ngfs->dir_lock);
+        debug("File already exists in ngfs_create");
+        return -EEXIST;
+    } else if (result != -ENOENT) {
+        rwlock_release(&ngfs->dir_lock);
+        debug("Error searching for file in ngfs_create: %d", result);
+        return result;
+    }
+
+    for (i = 0; i < NGFS_BLKSZ / NGFS_BLKSZ; i++) {
+        result = ngfs_read_root_dir(ngfs, i, &dir);
+        if (result < 0) {
+            rwlock_release(&ngfs->dir_lock);
+            debug("Error reading root dir in ngfs_create: %d", result);
+            return result;
+        }
+
+        if (dir.name[0] == '\0') {
+            break; // found an empty entry
+        }
+    }
+
+    if (i >= NGFS_BLKSZ / NGFS_DENSZ) {
+        rwlock_release(&ngfs->dir_lock);
+        debug("No free directory entry found in ngfs_create");
+        return -ENOMEM;
+    }
+
+    memset(&dir, 0, sizeof(dir));
+    strlcpy(dir.name, name, sizeof(dir.name));
+    dir.size = 0;
+    dir.start_block = NGFS_BLOCK_END;
+
+    result = ngfs_update_root_dir_entry(ngfs, i, &dir);
+
+    rwlock_release(&ngfs->dir_lock);
+
+    return result;
 }
 
 int ngfs_delete(struct filesystem * fs, const char * name) {
     // YOUR CODE HERE
-    return 0;
+    struct ngfs_mount * const ngfs = (struct ngfs_mount *)fs;
+    struct ngfs_dir_entry dir;
+    struct ngfs_dir_entry empty_dir;
+    struct ngfs_dir_entry next_dir;
+    unsigned long i;
+    unsigned long dir_index;
+    uint32_t curr_block;
+    uint32_t next_block;
+    int result;
+
+    if (fs == NULL || name == NULL) {
+        debug("Invalid argument(s) to ngfs_delete");
+        return -EINVAL;
+    }
+
+    if (name[0] == '\0') {
+        debug("Invalid argument(s) to ngfs_delete: empty file name");
+        return -EINVAL;
+    }
+
+    rwlock_acquire(&ngfs->dir_lock, 1);
+
+    result = ngfs_find_root_by_name(ngfs, name, &dir, &dir_index);
+    if (result < 0) {
+        rwlock_release(&ngfs->dir_lock);
+        return result;
+    }
+
+    if (dir.size > 0 && dir.start_block != NGFS_BLOCK_END) {
+        // need to free the data blocks occupied by the file
+        curr_block = dir.start_block;
+        while (curr_block != NGFS_BLOCK_END) {
+            next_block = get_next_data_block(ngfs, curr_block);
+            set_next_data_block(ngfs, curr_block, NGFS_BLOCK_FREE); // mark block as free in FAT
+            curr_block = next_block;
+        }
+    }
+
+    for (i = dir_index; i + 1 < NGFS_BLKSZ / NGFS_DENSZ; i++) {
+        result = ngfs_read_root_dir(ngfs, i + 1, &next_dir);
+        if (result < 0) {
+            rwlock_release(&ngfs->dir_lock);
+            rwlock_release(&ngfs->file_locks[dir_index]); // release file lock for the deleted file
+            debug("Error reading root dir in ngfs_delete: %d", result);
+            return result;
+        }
+
+        if (next_dir.name[0] == '\0') {
+            break; // reached the end of valid entries
+        }
+
+        result = ngfs_update_root_dir_entry(ngfs, i, &next_dir);
+        if (result < 0) {
+            rwlock_release(&ngfs->dir_lock);
+            rwlock_release(&ngfs->file_locks[dir_index]);
+            debug("Error updating root dir in ngfs_delete: %d", result);
+            return result;
+        }
+    }
+
+    memset(&empty_dir, 0, sizeof(empty_dir));
+    empty_dir.start_block = NGFS_BLOCK_END;
+    result = ngfs_update_root_dir_entry(ngfs, i, &empty_dir);
+
+    rwlock_release(&ngfs->dir_lock);
+    rwlock_release(&ngfs->file_locks[dir_index]);
+
+    return result;
 }
 
 void ngfs_flush(struct filesystem * fs) {
