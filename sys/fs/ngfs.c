@@ -212,6 +212,7 @@ long ngfs_fetch(struct io * io, unsigned long long pos, void * buf, long bufsz) 
     size_t copy_len;
     char * bufp;
     void * blk;
+    int result;
 
     if (io == NULL || (buf == NULL && bufsz != 0)) {
         return -EINVAL;
@@ -257,8 +258,9 @@ long ngfs_fetch(struct io * io, unsigned long long pos, void * buf, long bufsz) 
     bufp = (char *)buf;
     while (bufsz > 0) {
         phys_block_no = ngfs_phys_device_blockno(fs, curr_block); // map NGFS block No. to physical device block No.
-        if (cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk) < 0) {
-            retlen = -EIO;
+        result = cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk);
+        if (result < 0) {
+            retlen = result;
             goto out_unlock;
         }
 
@@ -294,7 +296,17 @@ out_unlock:
 
 long ngfs_read(struct io * io, void * buf, long bufsz) {
     // YOUR CODE HERE
-    return 0;
+    // TODO: if read() is called by multiple threads, may need to serialize the file pos var with locks as it might be updated by multiple threads.
+    struct ngfs_fileio * const fileio = (struct ngfs_fileio *)io;
+    long retlen;
+    if (io == NULL || (buf == NULL && bufsz != 0)) {
+        return -EINVAL;
+    }
+    retlen = ngfs_fetch(io, fileio->pos, buf, bufsz);
+    if (retlen > 0) {
+        fileio->pos += retlen; // update file position after a successful read
+    }
+    return retlen;
 }
 
 long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long len) {
