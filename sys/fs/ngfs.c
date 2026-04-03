@@ -34,6 +34,8 @@ struct ngfs_mount {
     unsigned long long byte_capacity; // total device capacity in bytes
     unsigned long total_blocks; // total number of NGFS blocks on the device
     unsigned long fat_blocks; // number of blocks used for the FAT
+
+    struct rwlock file_locks[NGFS_BLKSZ / NGFS_DENSZ]; // dir lock, allow concurrent reads and exlusive writes of the same file
 };
 
 struct ngfs_fileio {
@@ -100,6 +102,7 @@ int mount_ngfs(const char * mpname, struct io * bkgio) {
     struct ngfs_mount * fs;
     unsigned int blksz;
     int result;
+    unsigned long i;
 
     trace("%s(%s,%p)", __func__, mpname, bkgio);
     
@@ -159,6 +162,12 @@ int mount_ngfs(const char * mpname, struct io * bkgio) {
     }
 
     fs->bkgio = ioaddref(bkgio);
+
+    // Initialize locks for each root-dir entry
+    for (i = 0; i < NGFS_BLKSZ / NGFS_DENSZ; i++) {
+        rwlock_init(&fs->file_locks[i], "ngfs.file");
+    }
+
     fs->base = ngfs;
 
     // Register the mounted filesystem instance
@@ -192,7 +201,95 @@ void ngfs_reclaim(struct io * io) {
 
 long ngfs_fetch(struct io * io, unsigned long long pos, void * buf, long bufsz) {
     // YOUR CODE HERE
-    return 0;
+    struct ngfs_fileio * const fileio = (struct ngfs_fileio *)io;
+    struct ngfs_mount * const fs = fileio->fs;
+    unsigned long file_block_index;
+    unsigned long block_offset;
+    unsigned long phys_block_no;
+    unsigned long i;
+    long retlen;
+    uint32_t curr_block;
+    size_t copy_len;
+    char * bufp;
+    void * blk;
+
+    if (io == NULL || (buf == NULL && bufsz != 0)) {
+        return -EINVAL;
+    }
+
+    if (buf == NULL || bufsz == 0) {
+        return 0;
+    }
+
+    rwlock_acquire(&fs->file_locks[fileio->dir_index], 0); // acquire shared access lock
+
+    if (pos > fileio->dir.size) {
+        // start position beyond EOF
+        retlen = -EINVAL;
+        goto out_unlock;
+    }
+
+    if (pos == fileio->dir.size) {
+        // start position at EOF, return 0
+        retlen = 0;
+        goto out_unlock;
+    }
+
+    if (fileio->dir.size - pos < (unsigned long long)bufsz) {
+        // dynamically adjust the bufsz to prevent reading past EOF
+        bufsz = fileio->dir.size - pos;
+    }
+
+    file_block_index = pos / NGFS_BLKSZ;
+    block_offset = pos % NGFS_BLKSZ;
+
+    curr_block = fileio->dir.start_block;
+
+    for (i = 0; i < file_block_index; i++) {
+        curr_block = get_next_data_block(fs, curr_block);
+        if (curr_block == NGFS_BLOCK_END) {
+            // early end in FAT chain, indicating a on-disk metadata inconsistency
+            retlen = -EIO;
+            goto out_unlock;
+        }
+    }
+
+    bufp = (char *)buf;
+    while (bufsz > 0) {
+        phys_block_no = ngfs_phys_device_blockno(fs, curr_block); // map NGFS block No. to physical device block No.
+        if (cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk) < 0) {
+            retlen = -EIO;
+            goto out_unlock;
+        }
+
+        if (NGFS_BLKSZ - block_offset < (unsigned long)bufsz) {
+            copy_len = NGFS_BLKSZ - block_offset;
+        } else {
+            copy_len = bufsz;
+        }
+
+        memcpy(bufp, (char *)blk + block_offset, copy_len);
+        cache_release(fs->cache, blk, 0); // release after a pure read access, without marking dirty
+
+        bufsz -= copy_len;
+        bufp += copy_len;
+        block_offset = 0; // only first block can have a non-zero offset
+
+        if (bufsz > 0) {
+            curr_block = get_next_data_block(fs, curr_block);
+            if (curr_block == NGFS_BLOCK_END) {
+                // early end in FAT chain, indicating a on-disk metadata inconsistency
+                retlen = -EIO;
+                goto out_unlock;
+            }
+        }
+    }
+
+    retlen = bufp - (char *)buf; // total bytes read
+    
+out_unlock:
+    rwlock_release(&fs->file_locks[fileio->dir_index]);
+    return retlen;
 }
 
 long ngfs_read(struct io * io, void * buf, long bufsz) {
@@ -258,6 +355,7 @@ int ngfs_delete(struct filesystem * fs, const char * name) {
 
 void ngfs_flush(struct filesystem * fs) {
     // YOUR CODE HERE
+    
 }
 
 long ngfs_listing_read(struct io * lsio, void * buf, long bufsz) {
