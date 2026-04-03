@@ -309,11 +309,12 @@ out_unlock:
 long ngfs_read(struct io * io, void * buf, long bufsz) {
     // YOUR CODE HERE
     // TODO: if read() is called by multiple threads, may need to serialize the file pos var with locks as it might be updated by multiple threads.
-    struct ngfs_fileio * const fileio = (struct ngfs_fileio *)io;
+    struct ngfs_fileio * fileio;
     long retlen;
     if (io == NULL || (buf == NULL && bufsz != 0)) {
         return -EINVAL;
     }
+    fileio = (struct ngfs_fileio *)io;
     retlen = ngfs_fetch(io, fileio->pos, buf, bufsz);
     if (retlen > 0) {
         fileio->pos += retlen; // update file position after a successful read
@@ -452,14 +453,14 @@ out_unlock:
 
 int ngfs_ioctl(struct io * io, int op, void * arg) {
     // YOUR CODE HERE
+    if (io == NULL) {
+        return -EINVAL;
+    }
+    
     struct ngfs_fileio * const fileio = (struct ngfs_fileio *)io;
     unsigned long long * const ullarg = (unsigned long long *)arg;
     unsigned long long new_end;
     int result;
-
-    if (io == NULL) {
-        return -EINVAL;
-     }
 
     switch (op) {
         case IOC_GETPOS:
@@ -553,7 +554,7 @@ int ngfs_create(struct filesystem * fs, const char * name) {
         return result;
     }
 
-    for (i = 0; i < NGFS_BLKSZ / NGFS_BLKSZ; i++) {
+    for (i = 0; i < NGFS_BLKSZ / NGFS_DENSZ; i++) {
         result = ngfs_read_root_dir(ngfs, i, &dir);
         if (result < 0) {
             rwlock_release(&ngfs->dir_lock);
@@ -573,7 +574,7 @@ int ngfs_create(struct filesystem * fs, const char * name) {
     }
 
     memset(&dir, 0, sizeof(dir));
-    strlcpy(dir.name, name, sizeof(dir.name));
+    strncpy(dir.name, name, sizeof(dir.name));
     dir.size = 0;
     dir.start_block = NGFS_BLOCK_END;
 
@@ -614,6 +615,8 @@ int ngfs_delete(struct filesystem * fs, const char * name) {
         return result;
     }
 
+    rwlock_acquire(&ngfs->file_locks[dir_index], 1);
+
     if (dir.size > 0 && dir.start_block != NGFS_BLOCK_END) {
         // need to free the data blocks occupied by the file
         curr_block = dir.start_block;
@@ -624,11 +627,12 @@ int ngfs_delete(struct filesystem * fs, const char * name) {
         }
     }
 
+    // Shift up later directory entries to fill the gap
     for (i = dir_index; i + 1 < NGFS_BLKSZ / NGFS_DENSZ; i++) {
         result = ngfs_read_root_dir(ngfs, i + 1, &next_dir);
         if (result < 0) {
-            rwlock_release(&ngfs->dir_lock);
             rwlock_release(&ngfs->file_locks[dir_index]); // release file lock for the deleted file
+            rwlock_release(&ngfs->dir_lock);
             debug("Error reading root dir in ngfs_delete: %d", result);
             return result;
         }
@@ -639,8 +643,8 @@ int ngfs_delete(struct filesystem * fs, const char * name) {
 
         result = ngfs_update_root_dir_entry(ngfs, i, &next_dir);
         if (result < 0) {
-            rwlock_release(&ngfs->dir_lock);
             rwlock_release(&ngfs->file_locks[dir_index]);
+            rwlock_release(&ngfs->dir_lock);
             debug("Error updating root dir in ngfs_delete: %d", result);
             return result;
         }
@@ -650,8 +654,8 @@ int ngfs_delete(struct filesystem * fs, const char * name) {
     empty_dir.start_block = NGFS_BLOCK_END;
     result = ngfs_update_root_dir_entry(ngfs, i, &empty_dir);
 
-    rwlock_release(&ngfs->dir_lock);
     rwlock_release(&ngfs->file_locks[dir_index]);
+    rwlock_release(&ngfs->dir_lock);
 
     return result;
 }
@@ -750,7 +754,11 @@ static void set_next_data_block(const struct ngfs_mount * fs, uint32_t cur_block
 
     assert (fs != NULL);
     assert (cur_block < ngfs_data_block_count(fs));
-    assert (next_block < NGFS_BLOCK_END);
+    assert(
+        next_block == NGFS_BLOCK_FREE ||
+        next_block == NGFS_BLOCK_END ||
+        next_block < ngfs_data_block_count(fs)
+    );
 
     fat_blk_index = cur_block / NGFS_FAT_ENTRIES_PER_BLOCK;
     fat_entry_index = cur_block % NGFS_FAT_ENTRIES_PER_BLOCK;
