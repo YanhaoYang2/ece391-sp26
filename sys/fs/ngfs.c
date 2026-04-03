@@ -212,6 +212,7 @@ long ngfs_fetch(struct io * io, unsigned long long pos, void * buf, long bufsz) 
     size_t copy_len;
     char * bufp;
     void * blk;
+    int result;
 
     if (io == NULL || (buf == NULL && bufsz != 0)) {
         return -EINVAL;
@@ -257,8 +258,9 @@ long ngfs_fetch(struct io * io, unsigned long long pos, void * buf, long bufsz) 
     bufp = (char *)buf;
     while (bufsz > 0) {
         phys_block_no = ngfs_phys_device_blockno(fs, curr_block); // map NGFS block No. to physical device block No.
-        if (cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk) < 0) {
-            retlen = -EIO;
+        result = cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk);
+        if (result < 0) {
+            retlen = result;
             goto out_unlock;
         }
 
