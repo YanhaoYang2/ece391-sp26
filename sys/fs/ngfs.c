@@ -274,6 +274,7 @@ void ngfs_listing_reclaim(struct io * lsio) {
 
 // INTERNAL FUNCTION DEFINITIONS
 //
+// Returns the value at index cur_block in the FAT
 static uint32_t get_next_data_block(const struct ngfs_mount * fs, uint32_t cur_block) {
     // YOUR CODE HERE
     void * blk;
@@ -281,6 +282,7 @@ static uint32_t get_next_data_block(const struct ngfs_mount * fs, uint32_t cur_b
     unsigned long fat_blk_index;
     unsigned long fat_entry_index;
     uint32_t next_block;
+    int result;
 
     assert (fs != NULL);
     assert (cur_block < ngfs_data_block_count(fs));
@@ -288,20 +290,23 @@ static uint32_t get_next_data_block(const struct ngfs_mount * fs, uint32_t cur_b
     fat_blk_index = cur_block / NGFS_FAT_ENTRIES_PER_BLOCK;
     fat_entry_index = cur_block % NGFS_FAT_ENTRIES_PER_BLOCK;
 
-    assert (cache_fetch(fs->cache, fat_blk_index * NGFS_BLKSZ, 1, &blk) >= 0);
+    result = cache_fetch(fs->cache, fat_blk_index * NGFS_BLKSZ, 1, &blk);
+    assert (result >= 0);
 
     fat_blk = (struct ngfs_fat *) blk;
     next_block = fat_blk->fat[fat_entry_index];
 
     cache_release(fs->cache, blk, 0);
-    
+
     return next_block;
 }
 
+// Sets FAT[cur_block]= next_block
 static void set_next_data_block(const struct ngfs_mount * fs, uint32_t cur_block, uint32_t next_block) {
     // YOUR CODE HERE
 }
 
+//Scans the FAT, returning the first entry where FAT[entry]= NGFS_BLOCK_FREE
 static uint32_t get_free_data_block(const struct ngfs_mount * fs) {
     // YOUR CODE HERE
     return 0;
