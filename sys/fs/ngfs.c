@@ -11,7 +11,7 @@
 #ifdef NGFS_DEBUG
 #define DEBUG
 #endif
-
+#define ull unsigned long long
 #include "ngfs.h"
 
 #include "../cache.h"
@@ -322,6 +322,7 @@ long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long l
     size_t copy_len;
     const char* bufp;
     void* blk;
+    int result;
     if (io == NULL || (buf == NULL && len != 0)) {
         return -EINVAL;
     }
@@ -344,7 +345,7 @@ long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long l
     }
 
     if (fileio->dir.size - pos < (unsigned long long)len) {
-        // dynamically adjust the len to prevent reading past EOF
+        // dynamically adjust the len to prevent writing past EOF
         len = fileio->dir.size - pos;
     }
 
@@ -365,8 +366,9 @@ long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long l
     bufp = (char *)buf;
     while (len > 0) {
         phys_block_no = ngfs_phys_device_blockno(fs, curr_block); // map NGFS block No. to physical device block No.
-        if (cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk) < 0) {
-            retlen = -EIO;
+        result = cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk);
+        if (result < 0) {
+            retlen = result;
             goto out_unlock;
         }
 
@@ -401,47 +403,6 @@ out_unlock:
 
 long ngfs_write(struct io * io, const void * buf, long len) {
     // YOUR CODE HERE
-    return 0;
-}
-
-int ngfs_ioctl(struct io * io, int op, void * arg) {
-    // YOUR CODE HERE
-    struct ngfs_fileio * const fileio = (struct ngfs_fileio *)io;
-    unsigned long long * const ullarg = (unsigned long long *)arg;
-
-    if (io == NULL) {
-        return -EINVAL;
-     }
-
-    // TODO: Support more ioctls such as IOC_GETEND for file size, and IOC_SETEND for truncating/extending files.
-    switch (op) {
-        case IOC_GETPOS:
-            if (ullarg == NULL)
-                return -EINVAL;
-            *ullarg = fileio->pos;
-            return 0;
-
-        case IOC_SETPOS:
-            if (ullarg == NULL)
-                return -EINVAL;
-            if (*ullarg % io->blksz != 0)
-                return -EINVAL;
-            fileio->pos = *ullarg;
-            return 0;
-
-        case IOC_GETEND:
-            if (ullarg == NULL)
-                return -EINVAL;
-            *ullarg = fileio->dir.size;
-            return 0;
-        
-        case IOC_SETEND:
-            return -ENOTSUP;
-
-        default:
-            return -ENOTSUP;
-    }
-    return 0;
 }
 
 int ngfs_create(struct filesystem * fs, const char * name) {
