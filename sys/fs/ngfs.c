@@ -11,7 +11,7 @@
 #ifdef NGFS_DEBUG
 #define DEBUG
 #endif
-
+#define ull unsigned long long
 #include "ngfs.h"
 
 #include "../cache.h"
@@ -325,6 +325,7 @@ long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long l
     size_t copy_len;
     const char* bufp;
     void* blk;
+    int result;
     if (io == NULL || (buf == NULL && len != 0)) {
         return -EINVAL;
     }
@@ -347,7 +348,7 @@ long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long l
     }
 
     if (fileio->dir.size - pos < (unsigned long long)len) {
-        // dynamically adjust the len to prevent reading past EOF
+        // dynamically adjust the len to prevent writing past EOF
         len = fileio->dir.size - pos;
     }
 
@@ -368,8 +369,9 @@ long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long l
     bufp = (char *)buf;
     while (len > 0) {
         phys_block_no = ngfs_phys_device_blockno(fs, curr_block); // map NGFS block No. to physical device block No.
-        if (cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk) < 0) {
-            retlen = -EIO;
+        result = cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk);
+        if (result < 0) {
+            retlen = result;
             goto out_unlock;
         }
 
@@ -404,6 +406,7 @@ out_unlock:
 
 long ngfs_write(struct io * io, const void * buf, long len) {
     // YOUR CODE HERE
+<<<<<<< HEAD
     return 0;
 }
 
@@ -473,6 +476,8 @@ int ngfs_ioctl(struct io * io, int op, void * arg) {
         default:
             return -ENOTSUP;
     }
+=======
+>>>>>>> 23d965da3d25f0dfa2654029fcd935b2f0b9dfd5
 }
 
 int ngfs_create(struct filesystem * fs, const char * name) {
