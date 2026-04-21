@@ -34,6 +34,16 @@
 #define PATH_MAX 255
 #endif
 
+// for ab1043 age calculations
+#define NSEC_PER_SEC (1000000000UL)
+#define NSEC_PER_MIN (60UL * NSEC_PER_SEC)
+#define NSEC_PER_HR (60UL * NSEC_PER_MIN)
+#define NSEC_PER_DAY (24UL * NSEC_PER_HR)
+#define TICK_TO_DAYS(t) ((t) / NSEC_PER_DAY)
+
+#define DAYS_TO_YR_APPX(d) ((d) * 400 / 146097)
+#define LEAP_YEAR(y) (((y)%4 == 0 && (y)%100 != 0) || ((y)%400 == 0))
+
 // EXPORTED FUNCTION DECLARATIONS
 //
 
@@ -62,6 +72,7 @@ static long syswrite(int fd, const void * buf, size_t len);
 static int sysioctl(int fd, int cmd, uintptr_t arg_uma);
 static int syspipe(int * wfd, int * rfd);
 static int sysiodup(int oldfd, int newfd);
+static int sysab1043(unsigned long long dob);
 
 static int allocfd(struct process * proc, int reqfd, int notfd);
 
@@ -153,6 +164,11 @@ int syspipe(int * wfdptr, int * rfdptr) {
 
 int sysiodup(int oldfd, int newfd) {
     // YOUR CODE HERE
+    return 0;
+}
+
+int sysab1043(unsigned long long dob){
+    // YOUR CODE HERE (CP3)
     return 0;
 }
 

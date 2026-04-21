@@ -51,170 +51,173 @@ struct mregion {
 
 extern char memory_initialized;
 
-/**
- * @brief Initializes kernel memory pages (with proper permissions), sets up
- * the heap memory manager, and adds remaining memory to the free chunk list
- * @return None
- */
 extern void memory_init (
     const struct mregion * ram, unsigned long ramcnt,
     const struct mregion * mmio, unsigned long mmiocnt,
     const struct mregion * resv, unsigned long resvcnt);
 
-/**
- * @brief Gets the active memory space
- * @return The tag of the active memory space
- */
+// Initializes the main memory mappings, sets up the heap memory manager, and
+// adds any remaining memory to the free chunk list. This function must be called
+// before any other functions declared in memory.h. The global variable
+// /memory_initialized/, which is statically initialized to 0, is set to 1 by
+// memory_init(); it must not be modified externally.
+//
+// On return from memory_init(), the current memory space is the distinguished
+// /main/ memory space with mtag /main_mtag/. Additional memory spaces may be
+// created using calls to clone_active_mspace().
+//
+// On return memory_init() guarantees:
+// - /memory_initialized/ is set to 1.
+// - /heap_init()/ is called.
+// - The free chunk list is initialized.
+//
+// * This function must _not_ be called from an ISR.
+//
+// See clone_active_mspace().
+
 extern mtag_t active_mspace(void);
 
-/**
- * @brief Switches the active memory space by writing the satp register
- * @param mtag Tag to write into satp
- * @return Tag that was in satp prior
- */
+// Returns the mtag of the currently active memory space
+//
+// * This function may be called from an ISR.
+
 extern mtag_t switch_mspace(mtag_t mtag);
 
-/**
- * @brief Copies all pages and page tables from the active memory space into
- * newly allocated memory
- * @return Tag corresponding to newly allocated memory
- */
+// Switches to the memory table specified by /mtag/
+//
+// * This function must _not_ be called from an ISR.
+
 extern mtag_t clone_active_mspace(void);
 
-/**
- * @brief Unmaps and frees all non-global pages from the active memory space
- * @return None
- */
+// Copies all pages and page tables from the active memory space into newly
+// allocated memory.
+//
+// The new memory space retains references to all global pages, and contains
+// a copy of all of the data in all non-global pages in the active memory space.
+//
+// Returns the /mtag_t/ associated with the newly generated memory space.
+//
+// * This function must _not_ be called from an ISR.
+
 extern void reset_active_mspace(void);
 
-/**
- * @brief Switches memory spaces to main, unmaps and frees all non-global pages
- * from the previously active memory space
- * @return Tag corresponding to main memory space
- */
+// Unmaps and frees all non-global pages of the currently active memory space.
+//
+// On return guarantees that all unused pages are returned to the allocator.
+//
+// * This function must _not_ be called from an ISR.
+
 extern mtag_t discard_active_mspace(void);
 
-/**
- * @brief Adds page with provided virtual memory address and flags to page table
- * @param vma Virtual memory address for page (must be a PAGE_SIZE increment)
- * @param pp Pointer to page to be added to page table
- * @param rwxug_flags Flags to set on page
- * @return Newly mapped virtual memory address
- */
+// Unmaps all pages and frees all non-global pages of the currently active
+// memory space, and switches to the main memory space.
+//
+// On return, guarantees that all pages associated with only the discarded memory
+// space are returned to the allocator (including any non-global intermediate
+// pages)
+//
+// * This function must _not_ be called from an ISR.
+
 extern void* map_page(uintptr_t vma, void* pp, int rwxug_flags);
 
-/**
- * @brief Adds a range of contiguous pages with provided virtual memory address, size, and flags to
- * page table
- * @param vma Virtual memory address for page (must be a PAGE_SIZE increment)
- * @param size Number of bytes to be mapped as pages
- * @param pp Pointer to the first page to be added to page table
- * @param rwxug_flags Flags to set on page
- * @return Newly mapped virtual memory address
- */
+// Adds the specified page with the provided virtual memory address and flags to
+// the active memory table.
+//
+// * This function must _not_ be called from an ISR.
+
 extern void* map_range(uintptr_t vma, size_t size, void* pp, int rwxug_flags);
 
-/**
- * @brief Allocates memory for and maps a range of pages starting at provided virtual memory
- * address. Rounds up size to be a multiple of PAGE_SIZE
- * @param vma Virtual memory address to begin mapping at (must be a multiple of PAGE_SIZE)
- * @param size Size (in bytes) of range
- * @param rwxug_flags Flags to be set on pages in range
- * @return Newly mapped virtual memory address
- */
+// Adds the specified consecutive pages starting at the specified virtual memory
+// address with provided flags to the active memory table.
+//
+// * This function must _not_ be called from an ISR.
+
 extern void* alloc_and_map_range(uintptr_t vma, size_t size, int rwxug_flags);
 
-/**
- * @brief Sets passed flags for pages in range, overwriting previous flags. Rounds up size to 
- * be a multiple of PAGE_SIZE.
- * @param vp Virtual memory address to begin setting flags at (must be a multiple of PAGE_SIZE)
- * @param size Size (in bytes) of range
- * @param rwxug_flags Flags to set
- * @return None
- */
+// Allocates pages for and maps the specified range of memory into the active virtual
+// memory table.
+//
+// * This function must _not_ be called from an ISR.
+
 extern void set_range_flags(const void* vp, size_t size, int rwxug_flags);
 
-/**
- * @brief Unmaps a range of pages starting at provided virtual memory address and frees the pages.
- * Rounds up size to be a multiple of PAGE_SIZE.
- * @param vp Virtual memory address to begin unmapping at (must be a multiple of PAGE_SIZE)
- * @param size Size (in bytes) of range
- * @return None
- */
+// Sets passed flags for pages in range, overwriting previous flags. Rounds down vp
+// and rounds up vp to be a multiple of PAGE_SIZE.
+//
+// * This function must _not_ be called from an ISR.
+
 extern void unmap_and_free_range(void* vp, size_t size);
 
+// Unmaps and frees pages in range in the active memory table. Does not discriminate
+// against global pages.
+//
+// * This function must _not_ be called from an ISR.
 
-
-// TODO redo header comments for enforce vptr
-// /**
-//  * @brief Checks that pointer is wellformed and pointer + len does not wrap around zero,
-//  * then iterates over pages in range, confirming the pages are mapped and have AT LEAST
-//  * the passed flags set (it may have additional flags as well).
-//  * @param vp Virtual memory address to start validation
-//  * @param size Size (in bytes) of range
-//  * @param rwxug_flags Flags to check pages in range for
-//  * @return 0 on success; error on malformed pointer, unmapped page, or mismatching flags
-//  */
 extern int enforce_vptr(const void* vp, size_t size, int rwxug_flags);
 
-/**
- * @brief Checks that pointer is wellformed and the given string is valid. Since the length
- * of the string is unknown, we iterate through all characters of the string until \0 terminator,
- * confirming that the pages are mapped and have the passed flags set.
- * @param vs Virtual memory address that contains the string
- * @param rwxug_flags Flags to check pages
- * @return 0 on success; error on malformed pointer, unmapped page, or mismatching flags
- */
+// Checks whether an array contains only well-formed addresses, and that vp _ len
+// does not wrap around zero. Iterates over pages in range, and if flags require
+// only read and/or write permissions, maps any portions of the array that are
+// unmapped. Checks whether complete range has all flags required.
+//
+// * This function must _not_ be called from an ISR.
+
 extern int validate_vstr(const char* vs, int rwxug_flags);
 
-/**
- * @brief Allocates a single new page using alloc_phys_pages().
- * @return Address of the allocated page
- */
+// Iterates through string specified at vs until:
+// - A null termination is found (return 0)
+// - We enter an unmapped page (error)
+// - We enter a page which does not match the passed in flags (error)
+//
+// validate_vstr does not allocate or map any new pages.
+//
+// * This function may be called from an ISR.
+
 extern void* alloc_phys_page(void);
 
-/**
- * @brief Free a page using free_phys_pages().
- * @param pp Physical address of page to free
- * @return None
- */
+// Allocates a single new page and returns a pointer to its physical address.
+// If there are multiple suitable chunks, finds the best fit chunk.
+//
+// * This function must _not_ be called from an ISR.
+
 extern void free_phys_page(void* pp);
 
-/**
- * @brief Allocates the passed number of physical pages from the free chunk list
- * @details Finds smallest chunk that fits the requested number of pages. If chunk
- * exactly matches the number of pages requested, removes chunk from free chunk list,
- * otherwise breaks off the component of chunk that matches requested number of pages.
- * Panics if no chunk can be found that satisfies the request.
- * @param cnt Number of pages to allocate
- * @return Pointer to allocated pages
- */
+// Returns a physical page to the allocator for reuse
+//
+// * This function must _not_ be called from an ISR.
+
 extern void* alloc_phys_pages(unsigned int cnt);
 
-/**
- * @brief Adds chunk consisting of passed count of pages at passed pointer back to
- * free chunk list.
- * @param pp Physical address of memory region to add back to free chunk list
- * @param cnt Number of pages being freed
- * @return None
- */
+// Allocates the passed number of physical pages contiguously from the free chunk
+// list. If there are multiple suitable free chunks, finds the best fit chunk.
+// If no chunk is suitable for allocation request, may panic. Otherwise, removes
+// allocated pages from the free chunk list and returns a pointer to the start.
+//
+// * This function must _not_ be called from an ISR.
+
 extern void free_phys_pages(void* pp, unsigned int cnt);
 
-/**
- * @brief Counts the number of pages remaining in the free chunk list.
- * @return Number of pages remaining in the free chunk list
- */
+// Frees a set of contiguous pages starting at pp and returns them to the
+// allocator.
+//
+// * This function must _not_ be called from an ISR.
+
 extern unsigned long free_phys_page_count(void);
 
-/**
- * @brief Called by handle_umode_exception() in excp.c to
- * handle U mode load and store page faults. It returns 1 to indicate the fault
- * has been handled (the instruction should be restarted) and 0 to indicate that
- * the page fault is fatal and the process should be terminated.
- * @param tfr Trap frame for page fault (unused)
- * @param vma Virtual memory address that caused page fault
- * @return 1 if mapping was successful, 0 otherwise
- */
+// Counts the number of remaining pages in the free chunk list.
+//
+// * This function may be called from an ISR.
+
 extern int handle_umode_page_fault(struct trap_frame* tfr, uintptr_t vma);
+
+// Called by handle_umode_exception() in excp.c to handle U mode load and store
+// page faults. Allocates and maps the faulting address to a physical page in the
+// memory table.
+//
+// Returns 1 to indicate that the fault has been handled (instruction to be restarted)
+// and 0 to indicate that the page fault is fatal and the process should be terminated.
+//
+// * This function may _only_ be called in response to a load or store access fault
+// from U mode (unless you really know what you're doing)
 
 #endif

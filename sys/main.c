@@ -24,10 +24,10 @@
 #include "process.h"
 
 #ifndef STUDENT_CP1
-    #define INITEXE "shell"
+#define INITEXE "init"
 #else
-    #define INITEXE "trek-mp3-cp1"
-    #define CONSOLEDEV "uart1"
+#define INITEXE "trek-mp3-cp1"
+#define CONSOLEDEV "uart1"
 #endif
 
 #define CMNTNAME "c" // ngfs
@@ -100,9 +100,11 @@ void exec_init() {
 
 #ifndef STUDENT_CP1
     char * argv[] = { NULL };
-    // Make descriptor 0 be a null io object, which the shell will need
 
+    // Set up default descriptors
     current_process()->iotab[0] = create_nullio();
+    current_process()->iotab[1] = create_nullio();
+    open_device("uart1", &current_process()->iotab[2]);
 
     process_exec(initexe, 0, argv);
 #else

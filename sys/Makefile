@@ -3,6 +3,7 @@
 
 PREFIX=riscv64-unknown-elf-
 QEMU=qemu-system-riscv64
+HOSTCC ?= cc
 
 CC=$(PREFIX)gcc
 AS=$(PREFIX)as
@@ -13,7 +14,7 @@ UNIFDEF=unifdef
 
 TARGET=qvirt
 
-STUDENT_CP1=1
+STUDENT_CP1=0
 
 OBJS = \
 	board/$(TARGET)/init.o \
@@ -119,6 +120,49 @@ run: kernel.elf
 
 debug: kernel.elf
 	$(QEMU) $(QEMUOPTS) -m 16M -kernel $< -S -s
+
+test-elf.o: tests/test-elf.c
+	$(CC) $(CFLAGS) -c -o $@ $^
+
+test-elf.elf: $(OBJS) test-elf.o
+	$(LD) $(LDFLAGS) -o $@ $^
+
+run-test-elf: test-elf.elf
+	$(QEMU) $(QEMUOPTS) -m 8M -kernel $< | python3 tests/test-elf.py
+
+debug-test-elf: test-elf.elf
+	$(QEMU) $(QEMUOPTS) -m 8M -kernel $< -S -s
+
+test-ngfs.o: tests/test-ngfs.c
+	$(CC) $(CFLAGS) -c -o $@ $^
+
+test-ngfs.elf: $(OBJS) test-ngfs.o
+	$(LD) $(LDFLAGS) -o $@ $^
+
+run-test-ngfs: test-ngfs.elf
+	$(QEMU) $(QEMUOPTS) -m 16M -kernel $< | python3 tests/test-ngfs.py
+
+debug-test-ngfs: test-ngfs.elf
+	$(QEMU) $(QEMUOPTS) -m 16M -kernel $< -S -s
+
+test-ngfs-unit: tests/test-ngfs-unit.c fs/ngfs.c
+	$(HOSTCC) -std=c11 -Wall -Wextra -include tests/ngfs-unit-shim.h -o $@ $^
+
+run-test-ngfs-unit: test-ngfs-unit
+	./test-ngfs-unit
+
+test-ngfs-helpers-unit: tests/test-ngfs-helpers-unit.c
+	$(HOSTCC) -std=c11 -Wall -Wextra -include tests/ngfs-unit-shim.h -o $@ $<
+
+run-test-ngfs-helpers-unit: test-ngfs-helpers-unit
+	./test-ngfs-helpers-unit
+
+
+test-elf-unit: tests/test-elf-unit.c elf.c
+	$(HOSTCC) -std=c11 -Wall -Wextra -o $@ $^
+
+run-test-elf-unit: test-elf-unit
+	./test-elf-unit
 
 BLOB_OBJCOPY_FLAGS = \
 	--add-section .data.blob=blob.raw \
