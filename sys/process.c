@@ -60,7 +60,48 @@ void procmgr_init(void) {
 
 int process_exec(struct io * exeio, int argc, char ** argv) {
     // YOUR CODE HERE
-    return 0;
+    void * pg_stack;
+    int stksz;
+    struct process * proc=current_process();
+    // /Copies arguments from user space to a new page
+    pg_stack=alloc_phys_page();
+    assert(pg_stack!=NULL);
+    stksz=build_stack(pg_stack,argc,argv);
+    // if error code, free assigned page, return error code directly
+    if(stksz<0){
+        free_phys_page(pg_stack);
+        return stksz;
+    }
+    //Calls reset_active_mspace to unmap all pages mapped into user address space and frees the backing physical pages
+    reset_active_mspace();
+    //Calls elf_load to load and map program image
+    //prepares an entry function pointer
+    void (*eptr)(void);
+    int success= elf_load(exeio,&eptr);
+    iodropref(exeio);
+    if(success!=0){
+        free_phys_page(pg_stack);
+        return success;
+    }
+    map_page(UMEM_END_VMA-PAGE_SIZE,pg_stack,PTE_R|PTE_W|PTE_U);
+
+    
+    //zero initializes the trap frame
+    struct  trap_frame t1={0};
+    t1.sepc=eptr;
+    t1.a0=argc;
+    //(void *)(UMEM_END_VMA - stksz) maps to stack + PAGE_SIZE - stksz in physical memory it is the stack pointer(growing downwards) and also the origin of the argv arrat (growing upwards)
+    t1.a1=(void *)(UMEM_END_VMA - stksz);
+    t1.sp=(void *)(UMEM_END_VMA - stksz);
+
+    t1.sstatus=csrr_sstatus();
+    //back to user mode
+    t1.sstatus &= ~RISCV_SSTATUS_SPP;
+    //interrupt enabled upon swtiching to user mode
+    t1.sstatus |= RISCV_SSTATUS_SPIE;
+    void * scratch=(char *)running_thread_stack_anchor()-sizeof(struct trap_frame);
+    trap_frame_jump(&t1,scratch);
+
 }
 
 int process_fork(const struct trap_frame * tfr) {
@@ -70,6 +111,29 @@ int process_fork(const struct trap_frame * tfr) {
 
 void process_exit(void) {
     // YOUR CODE HERE
+    // if it is main process,flush and halt
+    struct process * proc = current_process();
+    if(proc==&main_proc){
+        flush_all_filesys();
+        shutdown();
+    }else{
+        //drop reference to all valid members of calling process's iotab
+        for(int i=0;i<PROC_IOMAX;i++){
+            if(proc->iotab[i]!=NULL){
+                iodropref(proc->iotab[i]);
+                proc->iotab[i] = NULL;
+            }
+        }
+
+        //discard the active memory space
+        discard_active_mspace();
+        //detach the  process from running thread, free memory allocated for the process, and exit running thread;
+        thread_attach_process(running_thread(),NULL);
+        kfree(proc);
+        exit_running_thread();
+
+    }
+
     return;
 }
 
