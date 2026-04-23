@@ -27,6 +27,15 @@
 
 // INTERNAL TYPE DEFINITIONS
 //
+
+struct ngfs_flock {
+    char name[NGFS_MAX_FILENAME_LEN + 1];
+    struct rwlock lock;              // per-file read/write lock
+    unsigned int open_refcnt;        // number of opened fileio objects
+    int deleted;                     // delayed reclaim after delete
+    struct ngfs_flock * next;
+};
+
 struct ngfs_mount {
     struct filesystem base; // base filesystem object exposed to the fs manager
     struct io * bkgio; // backing storage device for this mounted instance
@@ -35,8 +44,9 @@ struct ngfs_mount {
     unsigned long total_blocks; // total number of NGFS blocks on the device
     unsigned long fat_blocks; // number of blocks used for the FAT
 
-    struct rwlock file_locks[NGFS_BLKSZ / NGFS_DENSZ]; // dir lock, allow concurrent reads and exlusive writes of the same file
-    struct rwlock dir_lock; // lock for concurrent access to the root directory entries
+    struct rwlock dir_lock;   // root dir metadata + flock registry
+    struct rwlock fat_lock;   // FAT allocation/free/update
+    struct ngfs_flock * flock_head;
 };
 
 struct ngfs_fileio {
@@ -45,6 +55,7 @@ struct ngfs_fileio {
     struct ngfs_dir_entry dir;
     unsigned long dir_index;
     unsigned long long pos;
+    struct ngfs_flock * flock;       // lock object for this file
 };
 
 struct ngfs_listingio {
@@ -73,7 +84,22 @@ static int ngfs_update_root_dir_entry(struct ngfs_mount * fs, unsigned long inde
 static int ngfs_extend_file(struct ngfs_fileio * fileio, unsigned long long new_end);
 static int ngfs_truncate_file(struct ngfs_fileio * fileio, unsigned long long new_end);
 
-static int ngfs_refresh_open_dir(struct ngfs_fileio * fileio);
+static int ngfs_get_root_dentry(struct ngfs_mount * fs, struct ngfs_dir_entry * dir);
+static unsigned long ngfs_root_entry_count(struct ngfs_mount * fs);
+static unsigned long ngfs_root_capacity_entries(struct ngfs_mount * fs);
+static int ngfs_root_block_for_index(struct ngfs_mount * fs, unsigned long index, uint32_t * blkno_out);
+static int ngfs_ensure_root_capacity(struct ngfs_mount * fs, unsigned long needed_entries);
+static int ngfs_set_root_entry_count(struct ngfs_mount * fs, unsigned long nentries);
+
+static struct ngfs_flock * ngfs_find_flock_locked(struct ngfs_mount * fs, const char * name);
+static int ngfs_create_flock_locked(struct ngfs_mount * fs, const char * name, struct ngfs_flock ** out);
+static void ngfs_put_flock(struct ngfs_mount * fs, struct ngfs_flock * flock);
+static int ngfs_build_flock_registry(struct ngfs_mount * fs);
+
+static int ngfs_sync_file_dentry_locked(struct ngfs_fileio * fileio);
+
+static long ngfs_fetch_nolock(struct ngfs_fileio * fileio, unsigned long long pos, void * buf, long bufsz);
+static long ngfs_store_nolock(struct ngfs_fileio * fileio, unsigned long long pos, const void * buf, long len);
 
 // INTERNAL GLOBAL VARIABLES
 //
@@ -108,7 +134,6 @@ int mount_ngfs(const char * mpname, struct io * bkgio) {
     struct ngfs_mount * fs;
     unsigned int blksz;
     int result;
-    unsigned long i;
 
     trace("%s(%s,%p)", __func__, mpname, bkgio);
     
@@ -169,16 +194,21 @@ int mount_ngfs(const char * mpname, struct io * bkgio) {
 
     fs->bkgio = ioaddref(bkgio);
 
-    // Initialize locks for each root-dir entry
-    for (i = 0; i < NGFS_BLKSZ / NGFS_DENSZ; i++) {
-        rwlock_init(&fs->file_locks[i], "ngfs.file");
-    }
-
+    // Initialize locks
     rwlock_init(&fs->dir_lock, "ngfs.dir");
+    rwlock_init(&fs->fat_lock, "ngfs.fat");
+    fs->flock_head = NULL;
 
     fs->base = ngfs;
 
-    // Register the mounted filesystem instance
+    result = ngfs_build_flock_registry(fs);
+    if (result < 0) {
+        // if building flock registry fails, clean up and return error
+        iodropref(fs->bkgio);
+        kfree(fs);
+        return result;
+    }
+
     result = mount_filesys(mpname, &fs->base);
     if (result < 0) {
         iodropref(fs->bkgio);
@@ -210,107 +240,32 @@ void ngfs_reclaim(struct io * io) {
         debug("Invalid argument(s) to ngfs_reclaim");
         return;
     }
+
+    if (fileio->flock != NULL) {
+        ngfs_put_flock(fileio->fs, fileio->flock);
+    }
+
     kfree(fileio);
 }
 
 long ngfs_fetch(struct io * io, unsigned long long pos, void * buf, long bufsz) {
     // YOUR CODE HERE
     struct ngfs_fileio * const fileio = (struct ngfs_fileio *)io;
-    struct ngfs_mount * const fs = fileio->fs;
-    unsigned long file_block_index;
-    unsigned long block_offset;
-    unsigned long phys_block_no;
-    unsigned long i;
     long retlen;
-    uint32_t curr_block;
-    size_t copy_len;
-    char * bufp;
-    void * blk;
-    int result;
 
-    if (io == NULL || (buf == NULL && bufsz != 0)) {
+    if (io == NULL) {
         return -EINVAL;
     }
 
-    if (buf == NULL || bufsz == 0) {
-        return 0;
-    }
+    rwlock_acquire(&fileio->flock->lock, 0);
+    retlen = ngfs_fetch_nolock(fileio, pos, buf, bufsz); // logic moved to fetch no lock helper
+    rwlock_release(&fileio->flock->lock);
 
-    rwlock_acquire(&fs->file_locks[fileio->dir_index], 0); // acquire shared access lock
-
-    if (pos > fileio->dir.size) {
-        // start position beyond EOF
-        retlen = -EINVAL;
-        goto out_unlock;
-    }
-
-    if (pos == fileio->dir.size) {
-        // start position at EOF, return 0
-        retlen = 0;
-        goto out_unlock;
-    }
-
-    if (fileio->dir.size - pos < (unsigned long long)bufsz) {
-        // dynamically adjust the bufsz to prevent writing past EOF
-        bufsz = fileio->dir.size - pos;
-    }
-
-    file_block_index = pos / NGFS_BLKSZ;
-    block_offset = pos % NGFS_BLKSZ;
-
-    curr_block = fileio->dir.start_block;
-
-    for (i = 0; i < file_block_index; i++) {
-        curr_block = get_next_data_block(fs, curr_block);
-        if (curr_block == NGFS_BLOCK_END) {
-            // early end in FAT chain, indicating a on-disk metadata inconsistency
-            retlen = -EIO;
-            goto out_unlock;
-        }
-    }
-
-    bufp = (char *)buf;
-    while (bufsz > 0) {
-        phys_block_no = ngfs_phys_device_blockno(fs, curr_block); // map NGFS block No. to physical device block No.
-        result = cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk);
-        if (result < 0) {
-            retlen = result;
-            goto out_unlock;
-        }
-
-        if (NGFS_BLKSZ - block_offset < (unsigned long)bufsz) {
-            copy_len = NGFS_BLKSZ - block_offset;
-        } else {
-            copy_len = bufsz;
-        }
-
-        memcpy(bufp, (char *)blk + block_offset, copy_len);
-        cache_release(fs->cache, blk, 0); // release after a pure read access, without marking dirty
-
-        bufsz -= copy_len;
-        bufp += copy_len;
-        block_offset = 0; // only first block can have a non-zero offset
-
-        if (bufsz > 0) {
-            curr_block = get_next_data_block(fs, curr_block);
-            if (curr_block == NGFS_BLOCK_END) {
-                // early end in FAT chain, indicating a on-disk metadata inconsistency
-                retlen = -EIO;
-                goto out_unlock;
-            }
-        }
-    }
-
-    retlen = bufp - (char *)buf; // total bytes read
-    
-out_unlock:
-    rwlock_release(&fs->file_locks[fileio->dir_index]);
     return retlen;
 }
 
 long ngfs_read(struct io * io, void * buf, long bufsz) {
     // YOUR CODE HERE
-    // TODO: if read() is called by multiple threads, may need to serialize the file pos var with locks as it might be updated by multiple threads.
     if (io == NULL || (buf == NULL && bufsz != 0)) {
         return -EINVAL;
     }
@@ -327,99 +282,22 @@ long ngfs_read(struct io * io, void * buf, long bufsz) {
 long ngfs_store(struct io * io, unsigned long long pos, const void * buf, long len) {
     // YOUR CODE HERE
     struct ngfs_fileio * const fileio=(struct ngfs_fileio *)io;
-    struct ngfs_mount *const fs=fileio->fs;
-    unsigned long file_block_index;
-    unsigned long block_offset;
-    unsigned long phys_block_no;
-    unsigned long i;
     long retlen;
-    uint32_t curr_block;
-    size_t copy_len;
-    const char* bufp;
-    void* blk;
-    int result;
 
-    if (io == NULL || (buf == NULL && len != 0)) {
+    if (io == NULL) {
         return -EINVAL;
     }
 
-    if (buf == NULL || len == 0) {
-        return 0;
-    }
+    rwlock_acquire(&fileio->flock->lock, 1);
+    retlen = ngfs_store_nolock(fileio, pos, buf, len); // logics moved to store no lock helper
+    rwlock_release(&fileio->flock->lock);
 
-    rwlock_acquire(&fs->file_locks[fileio->dir_index], 1); // acquire exclusive access lock for store
-    if (pos > fileio->dir.size) {
-        // start position beyond EOF
-        retlen = -EINVAL;
-        goto out_unlock;
-    }
-
-    if (pos == fileio->dir.size) {
-        // start position at EOF, return 0
-        retlen = 0;
-        goto out_unlock;
-    }
-
-    if (fileio->dir.size - pos < (unsigned long long)len) {
-        // dynamically adjust the len to prevent reading past EOF
-        len = fileio->dir.size - pos;
-    }
-
-    file_block_index = pos / NGFS_BLKSZ;
-    block_offset = pos % NGFS_BLKSZ;
-
-    curr_block = fileio->dir.start_block;
-
-    for (i = 0; i < file_block_index; i++) {
-        curr_block = get_next_data_block(fs, curr_block);
-        if (curr_block == NGFS_BLOCK_END) {
-            // early end in FAT chain, indicating a on-disk metadata inconsistency
-            retlen = -EIO;
-            goto out_unlock;
-        }
-    }
-
-    bufp = (char *)buf;
-    while (len > 0) {
-        phys_block_no = ngfs_phys_device_blockno(fs, curr_block); // map NGFS block No. to physical device block No.
-        if (cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk) < 0) {
-            retlen = -EIO;
-            goto out_unlock;
-        }
-
-        if (NGFS_BLKSZ - block_offset < (unsigned long)len) {
-            copy_len = NGFS_BLKSZ - block_offset;
-        } else {
-            copy_len = len;
-        }
-
-        memcpy((char *)blk + block_offset, bufp, copy_len);
-        cache_release(fs->cache, blk, 1); // release after write access, mark dirty
-        
-        len -= copy_len;
-        bufp += copy_len;
-        block_offset = 0; // only first block can have a non-zero offset
-
-        if (len > 0) {
-            curr_block = get_next_data_block(fs, curr_block);
-            if (curr_block == NGFS_BLOCK_END) {
-                // early end in FAT chain, indicating an on-disk metadata inconsistency
-                retlen = -EIO;
-                goto out_unlock;
-            }
-        }
-    }
-
-    retlen = bufp - (const char *)buf; // total bytes written
-out_unlock:
-    rwlock_release(&fs->file_locks[fileio->dir_index]);
     return retlen;
 }
 
 long ngfs_write(struct io * io, const void * buf, long len) {
     // YOUR CODE HERE
     struct ngfs_fileio * const fileio = (struct ngfs_fileio *)io;
-    struct ngfs_mount * const fs = fileio->fs;
     unsigned long long end_pos;
     long retlen;
     int result;
@@ -432,26 +310,27 @@ long ngfs_write(struct io * io, const void * buf, long len) {
         return 0;
     }
 
-    rwlock_acquire(&fs->file_locks[fileio->dir_index], 1); // acquire exclusive access lock for write
+    rwlock_acquire(&fileio->fs->dir_lock, 0);
+    rwlock_acquire(&fileio->flock->lock, 1);
 
     end_pos = fileio->pos + (unsigned long long)len;
-
     if (end_pos > fileio->dir.size) {
-        // need to extend the file if end position is beyond current file size
         result = ngfs_extend_file(fileio, end_pos);
         if (result < 0) {
-            retlen = result;
-            goto out_unlock;
+            // if extending file fails, release locks before returning error
+            rwlock_release(&fileio->flock->lock);
+            rwlock_release(&fileio->fs->dir_lock);
+            return result;
         }
     }
 
-    retlen = ngfs_store(io, fileio->pos, buf, len);
+    retlen = ngfs_store_nolock(fileio, fileio->pos, buf, len);
     if (retlen > 0) {
-        fileio->pos += retlen; // update file position after a successful write
+        fileio->pos += retlen;
     }
 
-out_unlock:
-    rwlock_release(&fs->file_locks[fileio->dir_index]);
+    rwlock_release(&fileio->flock->lock);
+    rwlock_release(&fileio->fs->dir_lock);
     return retlen;
 }
 
@@ -469,7 +348,7 @@ int ngfs_ioctl(struct io * io, int op, void * arg) {
     switch (op) {
         case IOC_GETPOS:
             if (ullarg == NULL) {
-                debug("Invalid argument(s) to ngfs_ioctl(IOC_GETPOS)");
+                debug("Invalid argument to ngfs_ioctl(IOC_GETPOS)");
                 return -EINVAL;
             }
             *ullarg = fileio->pos;
@@ -477,11 +356,7 @@ int ngfs_ioctl(struct io * io, int op, void * arg) {
 
         case IOC_SETPOS:
             if (ullarg == NULL) {
-                debug("Invalid argument(s) to ngfs_ioctl(IOC_SETPOS)");
-                return -EINVAL;
-            }
-            if (*ullarg % io->blksz != 0) {
-                debug("Invalid argument(s) to ngfs_ioctl(IOC_SETPOS)");
+                debug("Invalid argument to ngfs_ioctl(IOC_SETPOS)");
                 return -EINVAL;
             }
             fileio->pos = *ullarg;
@@ -489,7 +364,7 @@ int ngfs_ioctl(struct io * io, int op, void * arg) {
 
         case IOC_GETEND:
             if (ullarg == NULL) {
-                debug("Invalid argument(s) to ngfs_ioctl(IOC_GETEND)");
+                debug("Invalid argument to ngfs_ioctl(IOC_GETEND)");
                 return -EINVAL;
             }
             *ullarg = fileio->dir.size;
@@ -497,30 +372,26 @@ int ngfs_ioctl(struct io * io, int op, void * arg) {
         
         case IOC_SETEND:
             if (ullarg == NULL) {
-                debug("Invalid argument(s) to ngfs_ioctl(IOC_SETEND)");
+                debug("Invalid argument to ngfs_ioctl(IOC_SETEND)");
                 return -EINVAL;
             }
             new_end = *ullarg;
 
-            rwlock_acquire(&fileio->fs->file_locks[fileio->dir_index], 1); // acquire exclusive access lock for truncate/extend operations
-            result = ngfs_refresh_open_dir(fileio);
-            if (result < 0) {
-                rwlock_release(&fileio->fs->file_locks[fileio->dir_index]);
-                return result;
-            }
+            rwlock_acquire(&fileio->fs->dir_lock, 0);
+            rwlock_acquire(&fileio->flock->lock, 1);
 
+            // if new end is the same as current size, do nothing and return success.
+            // else navigate to either extend or truncate helper depending on new end and current file size relationship
             if (new_end == fileio->dir.size) {
-                // new end is the same as current size, skip
                 result = 0;
             } else if (new_end > fileio->dir.size) {
-                // new end is larger than current size, extend called
                 result = ngfs_extend_file(fileio, new_end);
             } else {
-                // new end is smaller than current size, truncate called
                 result = ngfs_truncate_file(fileio, new_end);
             }
 
-            rwlock_release(&fileio->fs->file_locks[fileio->dir_index]);
+            rwlock_release(&fileio->flock->lock);
+            rwlock_release(&fileio->fs->dir_lock);
             return result;
 
         default:
@@ -532,7 +403,7 @@ int ngfs_create(struct filesystem * fs, const char * name) {
     // YOUR CODE HERE
     struct ngfs_mount * const ngfs = (struct ngfs_mount *)fs;
     struct ngfs_dir_entry dir;
-    unsigned long i;
+    unsigned long nentries;
     int result;
 
     if (fs == NULL || name == NULL) {
@@ -543,6 +414,10 @@ int ngfs_create(struct filesystem * fs, const char * name) {
     if (name[0] == '\0') {
         debug("Invalid argument(s) to ngfs_create: empty file name");
         return -EINVAL;
+    }
+
+    if (strcmp(name, ".") == 0) {
+        return -EINVAL; // reinforce the . dir
     }
 
     if (strlen(name) > NGFS_MAX_FILENAME_LEN) {
@@ -563,48 +438,59 @@ int ngfs_create(struct filesystem * fs, const char * name) {
         return result;
     }
 
-    for (i = 0; i < NGFS_BLKSZ / NGFS_DENSZ; i++) {
-        result = ngfs_read_root_dir(ngfs, i, &dir);
-        if (result < 0) {
-            rwlock_release(&ngfs->dir_lock);
-            debug("Error reading root dir in ngfs_create: %d", result);
-            return result;
-        }
+    nentries = ngfs_root_entry_count(ngfs);
 
-        if (dir.name[0] == '\0') {
-            break; // found an empty entry
-        }
-    }
-
-    if (i >= NGFS_BLKSZ / NGFS_DENSZ) {
+    // expand root dir if needed to accept the new entry
+    result = ngfs_ensure_root_capacity(ngfs, nentries + 1);
+    if (result < 0) {
         rwlock_release(&ngfs->dir_lock);
-        debug("No free directory entry found in ngfs_create");
-        return -ENOMEM;
+        return result;
     }
 
     memset(&dir, 0, sizeof(dir));
     strncpy(dir.name, name, sizeof(dir.name));
+    dir.name[sizeof(dir.name) - 1] = '\0';
     dir.size = 0;
     dir.start_block = NGFS_BLOCK_END;
 
-    result = ngfs_update_root_dir_entry(ngfs, i, &dir);
+    // call corresponding helpers to update root dir entry and create the file locks for the new files
+    result = ngfs_update_root_dir_entry(ngfs, nentries, &dir);
+    if (result < 0) {
+        rwlock_release(&ngfs->dir_lock);
+        return result;
+    }
+
+    result = ngfs_set_root_entry_count(ngfs, nentries + 1);
+    if (result < 0) {
+        rwlock_release(&ngfs->dir_lock);
+        return result;
+    }
+
+    result = ngfs_create_flock_locked(ngfs, name, NULL);
+    if (result < 0) {
+        rwlock_release(&ngfs->dir_lock);
+        return result;
+    }
 
     rwlock_release(&ngfs->dir_lock);
-
-    return result;
+    return 0;
 }
 
 int ngfs_delete(struct filesystem * fs, const char * name) {
     // YOUR CODE HERE
     struct ngfs_mount * const ngfs = (struct ngfs_mount *)fs;
     struct ngfs_dir_entry dir;
-    struct ngfs_dir_entry empty_dir;
     struct ngfs_dir_entry next_dir;
-    unsigned long i;
+    struct ngfs_dir_entry empty_dir;
+    struct ngfs_flock * flock;
+    struct ngfs_flock ** link;
     unsigned long dir_index;
+    unsigned long i;
+    unsigned long nentries;
     uint32_t curr_block;
     uint32_t next_block;
     int result;
+    int flock_freed = 0;
 
     if (fs == NULL || name == NULL) {
         debug("Invalid argument(s) to ngfs_delete");
@@ -616,6 +502,10 @@ int ngfs_delete(struct filesystem * fs, const char * name) {
         return -EINVAL;
     }
 
+    if (strcmp(name, ".") == 0) {
+        return -EINVAL;
+    }
+
     rwlock_acquire(&ngfs->dir_lock, 1);
 
     result = ngfs_find_root_by_name(ngfs, name, &dir, &dir_index);
@@ -624,49 +514,83 @@ int ngfs_delete(struct filesystem * fs, const char * name) {
         return result;
     }
 
-    rwlock_acquire(&ngfs->file_locks[dir_index], 1);
+    flock = ngfs_find_flock_locked(ngfs, name);
+    if (flock == NULL) {
+        rwlock_release(&ngfs->dir_lock);
+        return -EIO;
+    }
+
+    rwlock_acquire(&flock->lock, 1);
+
+    nentries = ngfs_root_entry_count(ngfs);
 
     if (dir.size > 0 && dir.start_block != NGFS_BLOCK_END) {
         // need to free the data blocks occupied by the file
+        rwlock_acquire(&ngfs->fat_lock, 1);
         curr_block = dir.start_block;
         while (curr_block != NGFS_BLOCK_END) {
             next_block = get_next_data_block(ngfs, curr_block);
             set_next_data_block(ngfs, curr_block, NGFS_BLOCK_FREE); // mark block as free in FAT
             curr_block = next_block;
         }
+        rwlock_release(&ngfs->fat_lock);
     }
 
     // Shift up later directory entries to fill the gap
-    for (i = dir_index; i + 1 < NGFS_BLKSZ / NGFS_DENSZ; i++) {
+    for (i = dir_index; i + 1 < nentries; i++) {
         result = ngfs_read_root_dir(ngfs, i + 1, &next_dir);
         if (result < 0) {
-            rwlock_release(&ngfs->file_locks[dir_index]); // release file lock for the deleted file
+            rwlock_release(&flock->lock);
             rwlock_release(&ngfs->dir_lock);
             debug("Error reading root dir in ngfs_delete: %d", result);
             return result;
         }
 
-        if (next_dir.name[0] == '\0') {
-            break; // reached the end of valid entries
-        }
-
         result = ngfs_update_root_dir_entry(ngfs, i, &next_dir);
         if (result < 0) {
-            rwlock_release(&ngfs->file_locks[dir_index]);
+            rwlock_release(&flock->lock);
             rwlock_release(&ngfs->dir_lock);
-            debug("Error updating root dir in ngfs_delete: %d", result);
             return result;
         }
     }
 
     memset(&empty_dir, 0, sizeof(empty_dir));
     empty_dir.start_block = NGFS_BLOCK_END;
-    result = ngfs_update_root_dir_entry(ngfs, i, &empty_dir);
 
-    rwlock_release(&ngfs->file_locks[dir_index]);
+    result = ngfs_update_root_dir_entry(ngfs, nentries - 1, &empty_dir);
+    if (result < 0) {
+        rwlock_release(&flock->lock);
+        rwlock_release(&ngfs->dir_lock);
+        return result;
+    }
+
+    result = ngfs_set_root_entry_count(ngfs, nentries - 1);
+    if (result < 0) {
+        rwlock_release(&flock->lock);
+        rwlock_release(&ngfs->dir_lock);
+        return result;
+    }
+
+    flock->deleted = 1;
+
+    if (flock->open_refcnt == 0) {
+        for (link = &ngfs->flock_head; *link != NULL; link = &(*link)->next) {
+            if (*link == flock) {
+                *link = flock->next;
+                flock_freed = 1;
+                break;
+            }
+        }
+    }
+
+    rwlock_release(&flock->lock);
+
+    if (flock_freed) {
+        kfree(flock);
+    }
+
     rwlock_release(&ngfs->dir_lock);
-
-    return result;
+    return 0;
 }
 
 void ngfs_flush(struct filesystem * fs) {
@@ -684,38 +608,41 @@ long ngfs_listing_read(struct io * lsio, void * buf, long bufsz) {
     // YOUR CODE HERE
     struct ngfs_listingio * const listingio = (struct ngfs_listingio *)lsio;
     struct ngfs_dir_entry dir;
-    unsigned long i;
-    size_t name_len;
-    size_t copy_len;
+    unsigned long nentries;
+    size_t name_len, copy_len;
     int result;
 
-    if (listingio ==NULL || (buf == NULL && bufsz != 0))
+    if (listingio == NULL || (buf == NULL && bufsz != 0)) {
         return -EINVAL;
+    }
 
-    if (buf == NULL || bufsz == 0)
+    if (buf == NULL || bufsz == 0) {
         return 0;
-    
-    for (i = listingio->next_index; i < NGFS_BLKSZ / NGFS_DENSZ; i++) {
-        result = ngfs_read_root_dir(listingio->fs, i, &dir);
-        if (result < 0)
+    }
+
+    rwlock_acquire(&listingio->fs->dir_lock, 0);
+
+    nentries = ngfs_root_entry_count(listingio->fs);
+
+    while (listingio->next_index < nentries) {
+        // read the next directory entry and copy the file name to the buffer
+        result = ngfs_read_root_dir(listingio->fs, listingio->next_index, &dir);
+        if (result < 0) {
+            rwlock_release(&listingio->fs->dir_lock);
             return result;
-        if (dir.name[0] == '\0')
-            continue; // empty entry, skip
-        name_len = strlen(dir.name);
-        if (name_len < (size_t)bufsz) {
-            copy_len = name_len;
-        } else {
-            copy_len = (size_t)bufsz;
         }
 
+        listingio->next_index++;
+
+        name_len = strlen(dir.name);
+        copy_len = (name_len < (size_t)bufsz) ? name_len : (size_t)bufsz;
         memcpy(buf, dir.name, copy_len);
-        if (copy_len < (size_t)bufsz) {
-            ((char *)buf)[copy_len] = '\0';
-        }
-        listingio->next_index = i + 1; // update next index for next call
+
+        rwlock_release(&listingio->fs->dir_lock);
         return copy_len;
     }
 
+    rwlock_release(&listingio->fs->dir_lock);
     return 0;
 }
 
@@ -817,60 +744,55 @@ static int ngfs_read_root_dir(struct ngfs_mount * fs, unsigned long index, struc
     // YOUR CODE HERE
     void * blk;
     struct ngfs_dir_entry * entry;
-    unsigned long root_phys_device_blkno;
+    unsigned long phys_blkno;
+    unsigned long offset;
+    uint32_t root_blkno;
     int result;
 
     if (fs == NULL || dir == NULL) {
-        debug("Invalid argument to ngfs_read_root_dir");
         return -EINVAL;
     }
 
-    if (index >= NGFS_BLKSZ / NGFS_DENSZ) {
-        debug("Root directory index %lu out of bounds", index);
-        return -EINVAL;
+    if (index >= ngfs_root_entry_count(fs)) {
+        return -ENOENT;
     }
 
-    // Convert root directory block number to physical device block number,
-    // then fectch root directory block from the cache. cache_fetch expects
-    // byte offset, so multiply block number by block size to get byte offset.
-    root_phys_device_blkno = ngfs_phys_device_blockno(fs, NGFS_ROOT_DATA_BLOCK);
-    // TODO: confirm throug testing that the cache api contract uses physical device block number instead of data block number
-    result = cache_fetch(fs->cache, root_phys_device_blkno * NGFS_BLKSZ, 1, &blk);
+    result = ngfs_root_block_for_index(fs, index, &root_blkno);
     if (result < 0) {
-        debug("cache_fetch() failed in ngfs_read_root_dir");
         return result;
     }
 
-    // Read indexed directory entry from the cached block.
+    phys_blkno = ngfs_phys_device_blockno(fs, root_blkno);
+    result = cache_fetch(fs->cache, phys_blkno * NGFS_BLKSZ, 1, &blk);
+    if (result < 0) {
+        return result;
+    }
+
+    offset = index % (NGFS_BLKSZ / NGFS_DENSZ);
     entry = (struct ngfs_dir_entry *)blk;
-    *dir = entry[index];
+    *dir = entry[offset]; // copy the directory entry at the offset position to the output
 
-    cache_release(fs->cache, blk, 0); // release without marking dirty after a pure read access
-
+    cache_release(fs->cache, blk, 0);
     return 0;
 }
 
 static int ngfs_find_root_by_name(struct ngfs_mount * fs, const char * name, struct ngfs_dir_entry * dir, unsigned long * indexptr) {
     // YOUR CODE HERE
     struct ngfs_dir_entry current_entry;
-    unsigned long i;
+    unsigned long i, nentries;
     int result;
 
     if (fs == NULL || name == NULL) {
-        debug("Invalid argument to ngfs_find_root_by_name");
         return -EINVAL;
     }
 
-    for (i = 0; i < NGFS_BLKSZ / NGFS_DENSZ; i++) {
-        result = ngfs_read_root_dir(fs, i, &current_entry);
-        
-        if (result < 0) {
-            debug("ngfs_read_root_dir() failed in ngfs_find_root_by_name");
-            return result;
-        }
+    nentries = ngfs_root_entry_count(fs);
 
-        if (current_entry.name[0] == '\0') {
-            continue; // empty entry
+    // updated iteration logic to use nentries count as boundry checker
+    for (i = 0; i < nentries; i++) {
+        result = ngfs_read_root_dir(fs, i, &current_entry);
+        if (result < 0) {
+            return result;
         }
 
         if (strcmp(current_entry.name, name) == 0) {
@@ -880,7 +802,7 @@ static int ngfs_find_root_by_name(struct ngfs_mount * fs, const char * name, str
             if (indexptr != NULL) {
                 *indexptr = i;
             }
-            return 0; // found entry
+            return 0;
         }
     }
 
@@ -891,18 +813,32 @@ static int ngfs_open_fileio(struct ngfs_mount * fs, const char * name, struct io
     // YOUR CODE HERE
     struct ngfs_fileio * fileio;
     struct ngfs_dir_entry dir;
+    struct ngfs_flock * flock;
     unsigned long dir_index;
     int result;
 
-    // Look up requested file in the root directory
+    rwlock_acquire(&fs->dir_lock, 1);
+
     result = ngfs_find_root_by_name(fs, name, &dir, &dir_index);
     if (result < 0) {
+        rwlock_release(&fs->dir_lock);
         debug("ngfs_find_root_by_name() failed in ngfs_open_fileio");
         return result;
     }
 
+    flock = ngfs_find_flock_locked(fs, name);
+    if (flock == NULL) {
+        rwlock_release(&fs->dir_lock);
+        return -EIO;
+    }
+
+    flock->open_refcnt++;
+
+    rwlock_release(&fs->dir_lock);
+
     fileio = kcalloc(1, sizeof(*fileio)); // allocate new object space for each open call
     if (fileio == NULL) {
+        ngfs_put_flock(fs, flock);
         debug("kcalloc() failed in ngfs_open_fileio");
         return -ENOMEM;
     }
@@ -911,6 +847,7 @@ static int ngfs_open_fileio(struct ngfs_mount * fs, const char * name, struct io
     fileio->dir = dir;
     fileio->dir_index = dir_index;
     fileio->pos = 0; // new file after openning start position placed at 0
+    fileio->flock = flock;
 
     *ioptr = ioinit(&fileio->io, &ngfs_file_intf, 1, 1);
     return 0;
@@ -936,30 +873,32 @@ static int ngfs_update_root_dir_entry(struct ngfs_mount * fs, unsigned long inde
     // YOUR CODE HERE
     void * blk;
     struct ngfs_dir_entry * entry;
-    unsigned long root_phys_device_blkno;
+    unsigned long phys_blkno;
+    unsigned long offset;
+    uint32_t root_blkno;
     int result;
 
     if (fs == NULL || dir == NULL) {
-        debug("Invalid argument to ngfs_update_root_dir_entry");
         return -EINVAL;
     }
 
-    if (index >= NGFS_BLKSZ / NGFS_DENSZ) {
-        debug("Root directory index %lu out of bounds", index);
-        return -EINVAL;
-    }
-
-    root_phys_device_blkno = ngfs_phys_device_blockno(fs, NGFS_ROOT_DATA_BLOCK);
-    result = cache_fetch(fs->cache, root_phys_device_blkno * NGFS_BLKSZ, 1, &blk);
+    result = ngfs_root_block_for_index(fs, index, &root_blkno); // find the root block corresponding to the index
     if (result < 0) {
-        debug("cache_fetch() failed in ngfs_update_root_dir_entry");
         return result;
     }
 
-    entry = (struct ngfs_dir_entry *)blk;
-    entry[index] = *dir; // update indexed directory entry with new content
-    cache_release(fs->cache, blk, 1); // release and mark dirty after modifying the cached block
+    phys_blkno = ngfs_phys_device_blockno(fs, root_blkno);
+    result = cache_fetch(fs->cache, phys_blkno * NGFS_BLKSZ, 1, &blk);
+    if (result < 0) {
+        return result;
+    }
 
+    // calculate the offset of the directory entry within the block
+    offset = index % (NGFS_BLKSZ / NGFS_DENSZ);
+    entry = (struct ngfs_dir_entry *)blk;
+    entry[offset] = *dir;
+
+    cache_release(fs->cache, blk, 1);
     return 0;
 }
 
@@ -1008,10 +947,11 @@ static int ngfs_extend_file(struct ngfs_fileio * fileio, unsigned long long new_
     }
 
     if (new_blocks_count > old_block_count) {
+        rwlock_acquire(&fs->fat_lock, 1);
         if (old_block_count == 0) {
             new_block = get_free_data_block(fs);
             if (new_block == NGFS_BLOCK_END) {
-                debug("No free data block available in ngfs_extend_file");
+                rwlock_release(&fs->fat_lock);
                 return -ENOMEM;
             }
             set_next_data_block(fs, new_block, NGFS_BLOCK_END);
@@ -1020,7 +960,7 @@ static int ngfs_extend_file(struct ngfs_fileio * fileio, unsigned long long new_
             for (i = 1; i < new_blocks_count; i++) {
                 new_block = get_free_data_block(fs);
                 if (new_block == NGFS_BLOCK_END) {
-                    debug("No free data block available in ngfs_extend_file");
+                    rwlock_release(&fs->fat_lock);
                     return -ENOMEM;
                 }
                 set_next_data_block(fs, new_block, NGFS_BLOCK_END);
@@ -1028,7 +968,6 @@ static int ngfs_extend_file(struct ngfs_fileio * fileio, unsigned long long new_
                 prev_block = new_block;
             }
         } else {
-            // find the last block in FAt and append new blocks to it
             curr_block = fileio->dir.start_block;
             for (i = 1; i < old_block_count; i++) {
                 curr_block = get_next_data_block(fs, curr_block);
@@ -1037,7 +976,7 @@ static int ngfs_extend_file(struct ngfs_fileio * fileio, unsigned long long new_
             for (i = old_block_count; i < new_blocks_count; i++) {
                 new_block = get_free_data_block(fs);
                 if (new_block == NGFS_BLOCK_END) {
-                    debug("No free data block available in ngfs_extend_file");
+                    rwlock_release(&fs->fat_lock);
                     return -ENOMEM;
                 }
                 set_next_data_block(fs, new_block, NGFS_BLOCK_END);
@@ -1045,6 +984,7 @@ static int ngfs_extend_file(struct ngfs_fileio * fileio, unsigned long long new_
                 prev_block = new_block;
             }
         }
+        rwlock_release(&fs->fat_lock);
     }
 
     // zero fill the newly allocated blocks
@@ -1058,7 +998,7 @@ static int ngfs_extend_file(struct ngfs_fileio * fileio, unsigned long long new_
         } else {
             chunk_size = (long)remaining_zero_bytes;
         }
-        result = ngfs_store(&fileio->io, zero_pos, zero_buf, chunk_size);
+        result = ngfs_store_nolock(fileio, zero_pos, zero_buf, chunk_size);
         if (result <= 0) {
             debug("ngfs_store() failed in ngfs_extend_file while zero-filling new blocks");
             return result < 0 ? result : -EIO;
@@ -1067,9 +1007,8 @@ static int ngfs_extend_file(struct ngfs_fileio * fileio, unsigned long long new_
         remaining_zero_bytes -= result;
     }
 
-    result = ngfs_update_root_dir_entry(fs, fileio->dir_index, &fileio->dir);
+    result = ngfs_sync_file_dentry_locked(fileio); // sync file dentry to update the file size and new blocks into root dir
     if (result < 0) {
-        debug("ngfs_update_root_dir_entry() failed in ngfs_extend_file after updating file size in directory entry");
         return result;
     }
 
@@ -1117,6 +1056,7 @@ static int ngfs_truncate_file(struct ngfs_fileio * fileio, unsigned long long ne
     if (new_block_count == old_block_count) {
         fileio->dir.size = new_end;
     } else {
+        rwlock_acquire(&fs->fat_lock, 1);
         if (new_block_count == 0) {
             curr_block = fileio->dir.start_block;
             while (curr_block != NGFS_BLOCK_END) {
@@ -1131,13 +1071,12 @@ static int ngfs_truncate_file(struct ngfs_fileio * fileio, unsigned long long ne
             for (i = 1; i < new_block_count; i++) {
                 curr_block = get_next_data_block(fs, curr_block);
                 if (curr_block == NGFS_BLOCK_END) {
-                    // early end in FAT chain - on-disk metadata inconsistency
-                    debug("Early end in FAT chain found in ngfs_truncate_file");
+                    rwlock_release(&fs->fat_lock);
                     return -EIO;
                 }
             }
             free_block = get_next_data_block(fs, curr_block);
-            set_next_data_block(fs, curr_block, NGFS_BLOCK_END); // mark new end of FAT chain
+            set_next_data_block(fs, curr_block, NGFS_BLOCK_END);
             while (free_block != NGFS_BLOCK_END) {
                 next_block = get_next_data_block(fs, free_block);
                 set_next_data_block(fs, free_block, NGFS_BLOCK_FREE);
@@ -1145,26 +1084,452 @@ static int ngfs_truncate_file(struct ngfs_fileio * fileio, unsigned long long ne
             }
             fileio->dir.size = new_end;
         }
+        rwlock_release(&fs->fat_lock);
     }
 
     if (fileio->pos > new_end) {
         fileio->pos = new_end; // move file position back to new end if it is currently beyond new end after truncation
     }
 
-    result = ngfs_update_root_dir_entry(fs, fileio->dir_index, &fileio->dir);
+    result = ngfs_sync_file_dentry_locked(fileio);
     if (result < 0) {
-        debug("ngfs_update_root_dir_entry() failed in ngfs_truncate_file after updating file size in directory entry");
         return result;
     }
 
     return 0;
 }
 
-static int ngfs_refresh_open_dir(struct ngfs_fileio * fileio) {
-    if (fileio == NULL) {
-        debug("Invalid argument to ngfs_refresh_open_dir");
+static struct ngfs_flock * ngfs_find_flock_locked(struct ngfs_mount * fs, const char * name) {
+    // find the file lock corresponding to the file name in the flock registry linked list iteratively
+    struct ngfs_flock * cur;
+
+    if (fs == NULL || name == NULL) {
+        return NULL;
+    }
+
+    for (cur = fs->flock_head; cur != NULL; cur = cur->next) {
+        if (strcmp(cur->name, name) == 0) {
+            return cur;
+        }
+    }
+
+    return NULL;
+}
+
+static int ngfs_create_flock_locked(struct ngfs_mount * fs, const char * name, struct ngfs_flock ** out) {
+    // create a new file lock and add it to the flock registry linked list
+    struct ngfs_flock * flock;
+
+    if (fs == NULL || name == NULL) {
         return -EINVAL;
     }
 
-    return ngfs_read_root_dir(fileio->fs, fileio->dir_index, &fileio->dir);
+    flock = kcalloc(1, sizeof(*flock));
+    if (flock == NULL) {
+        return -ENOMEM;
+    }
+
+    strncpy(flock->name, name, sizeof(flock->name));
+    flock->name[sizeof(flock->name) - 1] = '\0';
+    rwlock_init(&flock->lock, "ngfs.file");
+    flock->open_refcnt = 0;
+    flock->deleted = 0;
+    flock->next = fs->flock_head;
+    fs->flock_head = flock;
+
+    if (out != NULL) {
+        *out = flock;
+    }
+
+    return 0;
+}
+
+static void ngfs_put_flock(struct ngfs_mount * fs, struct ngfs_flock * flock) {
+    struct ngfs_flock ** link;
+
+    if (fs == NULL || flock == NULL) {
+        return;
+    }
+
+    rwlock_acquire(&fs->dir_lock, 1);
+
+    if (flock->open_refcnt > 0) {
+        flock->open_refcnt--;
+    }
+
+    if (flock->deleted && flock->open_refcnt == 0) {
+        for (link = &fs->flock_head; *link != NULL; link = &(*link)->next) {
+            // locate the file lock and remove it
+            if (*link == flock) {
+                *link = flock->next;
+                kfree(flock);
+                break;
+            }
+        }
+    }
+
+    rwlock_release(&fs->dir_lock);
+}
+
+static int ngfs_build_flock_registry(struct ngfs_mount * fs) {
+    struct ngfs_dir_entry dir;
+    unsigned long i, nentries;
+    int result;
+
+    if (fs == NULL) {
+        return -EINVAL;
+    }
+
+    rwlock_acquire(&fs->dir_lock, 1);
+
+    // iterate through root dir entries and create file locks for them
+    nentries = ngfs_root_entry_count(fs);
+    for (i = 1; i < nentries; i++) {
+        result = ngfs_read_root_dir(fs, i, &dir);
+        if (result < 0) {
+            rwlock_release(&fs->dir_lock);
+            return result;
+        }
+
+        if (dir.name[0] == '\0') {
+            continue;
+        }
+
+        if (ngfs_find_flock_locked(fs, dir.name) == NULL) {
+            result = ngfs_create_flock_locked(fs, dir.name, NULL);
+            if (result < 0) {
+                rwlock_release(&fs->dir_lock);
+                return result;
+            }
+        }
+    }
+
+    rwlock_release(&fs->dir_lock);
+    return 0;
+}
+
+static int ngfs_get_root_dentry(struct ngfs_mount * fs, struct ngfs_dir_entry * dir) {
+    void * blk;
+    struct ngfs_dir_entry * entry;
+    unsigned long root_phys_device_blkno;
+    int result;
+
+    if (fs == NULL || dir == NULL) {
+        return -EINVAL;
+    }
+
+    root_phys_device_blkno = ngfs_phys_device_blockno(fs, NGFS_ROOT_DATA_BLOCK);
+    result = cache_fetch(fs->cache, root_phys_device_blkno * NGFS_BLKSZ, 1, &blk);
+    if (result < 0) {
+        return result;
+    }
+
+    entry = (struct ngfs_dir_entry *)blk;
+    *dir = entry[0];
+
+    cache_release(fs->cache, blk, 0);
+    return 0;
+}
+
+static unsigned long ngfs_root_entry_count(struct ngfs_mount * fs) {
+    // calculate the number of entries based on the size field in the root directory entry
+    struct ngfs_dir_entry root;
+    int result;
+
+    result = ngfs_get_root_dentry(fs, &root);
+    if (result < 0) {
+        return 0;
+    }
+
+    return root.size / NGFS_DENSZ;
+}
+
+static unsigned long ngfs_root_capacity_entries(struct ngfs_mount * fs) {
+    unsigned long blocks = 1;
+    uint32_t blk = NGFS_ROOT_DATA_BLOCK;
+
+    while (1) {
+        // iterate through the FAT chain of root directory blocks to count blocks that are allocated to the root dir
+        uint32_t next = get_next_data_block(fs, blk);
+        if (next == NGFS_BLOCK_END) {
+            break;
+        }
+        blk = next;
+        blocks++;
+    }
+
+    return blocks * (NGFS_BLKSZ / NGFS_DENSZ);
+}
+
+static int ngfs_root_block_for_index(struct ngfs_mount * fs, unsigned long index, uint32_t * blkno_out) {
+    unsigned long entries_per_block;
+    unsigned long block_hops; // nomber of blocks to hop through the FAT chain to reach the block containing the directory entry at the given idx
+    uint32_t blk;
+
+    if (fs == NULL || blkno_out == NULL) {
+        return -EINVAL;
+    }
+
+    entries_per_block = NGFS_BLKSZ / NGFS_DENSZ;
+    block_hops = index / entries_per_block;
+    blk = NGFS_ROOT_DATA_BLOCK;
+
+    while (block_hops > 0) {
+        blk = get_next_data_block(fs, blk);
+        if (blk == NGFS_BLOCK_END) {
+            return -EIO;
+        }
+        block_hops--;
+    }
+
+    *blkno_out = blk;
+    return 0;
+}
+
+static int ngfs_set_root_entry_count(struct ngfs_mount * fs, unsigned long nentries) {
+    void * blk;
+    struct ngfs_dir_entry * entry;
+    unsigned long root_phys_device_blkno;
+    int result;
+
+    if (fs == NULL || nentries == 0) {
+        return -EINVAL;
+    }
+
+    root_phys_device_blkno = ngfs_phys_device_blockno(fs, NGFS_ROOT_DATA_BLOCK);
+    result = cache_fetch(fs->cache, root_phys_device_blkno * NGFS_BLKSZ, 1, &blk);
+    if (result < 0) {
+        return result;
+    }
+
+    entry = (struct ngfs_dir_entry *)blk;
+    entry[0].size = nentries * NGFS_DENSZ;
+    entry[0].start_block = NGFS_ROOT_DATA_BLOCK;
+    strncpy(entry[0].name, ".", sizeof(entry[0].name)); // by convention the first entry in root dir is reserved with name "."
+    entry[0].name[sizeof(entry[0].name) - 1] = '\0';
+
+    cache_release(fs->cache, blk, 1);
+    return 0;
+}
+
+static int ngfs_ensure_root_capacity(struct ngfs_mount * fs, unsigned long needed_entries) {
+    unsigned long capacity;
+    uint32_t blk;
+    uint32_t newblk;
+
+    if (fs == NULL) {
+        return -EINVAL;
+    }
+
+    capacity = ngfs_root_capacity_entries(fs);
+    if (capacity >= needed_entries) {
+        return 0; // no need to extend root directory as capacity is sufficient to hold the needed space
+    }
+
+    rwlock_acquire(&fs->fat_lock, 1);
+
+    blk = NGFS_ROOT_DATA_BLOCK;
+    while (get_next_data_block(fs, blk) != NGFS_BLOCK_END) {
+        blk = get_next_data_block(fs, blk);
+    }
+
+    while (capacity < needed_entries) {
+        // still need a new block, allocate!
+        newblk = get_free_data_block(fs);
+        if (newblk == NGFS_BLOCK_END) {
+            rwlock_release(&fs->fat_lock);
+            return -ENOMEM;
+        }
+
+        set_next_data_block(fs, newblk, NGFS_BLOCK_END);
+        set_next_data_block(fs, blk, newblk);
+
+        {
+            void * newblk_ptr; // temp pointer to zero out newly allocated block
+            unsigned long phys = ngfs_phys_device_blockno(fs, newblk);
+            int result = cache_fetch(fs->cache, phys * NGFS_BLKSZ, 1, &newblk_ptr);
+            if (result < 0) {
+                rwlock_release(&fs->fat_lock);
+                return result;
+            }
+
+            memset(newblk_ptr, 0, NGFS_BLKSZ);
+            cache_release(fs->cache, newblk_ptr, 1);
+        }
+
+        blk = newblk;
+        capacity += NGFS_BLKSZ / NGFS_DENSZ;
+    }
+
+    rwlock_release(&fs->fat_lock);
+    return 0;
+}
+
+static int ngfs_sync_file_dentry_locked(struct ngfs_fileio * fileio) {
+    unsigned long cur_index;
+    int result;
+
+    if (fileio == NULL || fileio->flock == NULL) {
+        return -EINVAL;
+    }
+
+    result = ngfs_find_root_by_name(fileio->fs, fileio->flock->name, NULL, &cur_index);
+    if (result < 0) {
+        return result;
+    }
+
+    fileio->dir_index = cur_index;
+    return ngfs_update_root_dir_entry(fileio->fs, cur_index, &fileio->dir); // call update helper to sync the file dentry changes in fileio 
+}
+
+static long ngfs_fetch_nolock(struct ngfs_fileio * fileio, unsigned long long pos, void * buf, long bufsz) {
+    // moved the logic of fetching to this helper
+    struct ngfs_mount * const fs = fileio->fs;
+    unsigned long file_block_index;
+    unsigned long block_offset;
+    unsigned long phys_block_no;
+    unsigned long i;
+    long retlen;
+    uint32_t curr_block;
+    size_t copy_len;
+    char * bufp;
+    void * blk;
+    int result;
+
+    if (fileio == NULL || (buf == NULL && bufsz != 0)) {
+        return -EINVAL;
+    }
+
+    if (buf == NULL || bufsz == 0) {
+        return 0;
+    }
+
+    if (pos > fileio->dir.size) {
+        return -EINVAL;
+    }
+
+    if (pos == fileio->dir.size) {
+        return 0;
+    }
+
+    if (fileio->dir.size - pos < (unsigned long long)bufsz) {
+        bufsz = fileio->dir.size - pos;
+    }
+
+    file_block_index = pos / NGFS_BLKSZ;
+    block_offset = pos % NGFS_BLKSZ;
+    curr_block = fileio->dir.start_block;
+
+    for (i = 0; i < file_block_index; i++) {
+        curr_block = get_next_data_block(fs, curr_block);
+        if (curr_block == NGFS_BLOCK_END) {
+            return -EIO;
+        }
+    }
+
+    bufp = (char *)buf;
+    while (bufsz > 0) {
+        phys_block_no = ngfs_phys_device_blockno(fs, curr_block);
+        result = cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk);
+        if (result < 0) {
+            return result;
+        }
+
+        copy_len = (NGFS_BLKSZ - block_offset < (unsigned long)bufsz)
+            ? (NGFS_BLKSZ - block_offset)
+            : (size_t)bufsz;
+
+        memcpy(bufp, (char *)blk + block_offset, copy_len);
+        cache_release(fs->cache, blk, 0);
+
+        bufsz -= copy_len;
+        bufp += copy_len;
+        block_offset = 0;
+
+        if (bufsz > 0) {
+            curr_block = get_next_data_block(fs, curr_block);
+            if (curr_block == NGFS_BLOCK_END) {
+                return -EIO;
+            }
+        }
+    }
+
+    retlen = bufp - (char *)buf;
+    return retlen;
+}
+
+static long ngfs_store_nolock(struct ngfs_fileio * fileio, unsigned long long pos, const void * buf, long len) {
+    // moved the logic of storing to this helper
+    struct ngfs_mount * const fs = fileio->fs;
+    unsigned long file_block_index;
+    unsigned long block_offset;
+    unsigned long phys_block_no;
+    unsigned long i;
+    long retlen;
+    uint32_t curr_block;
+    size_t copy_len;
+    const char * bufp;
+    void * blk;
+    int result;
+
+    if (fileio == NULL || (buf == NULL && len != 0)) {
+        return -EINVAL;
+    }
+
+    if (buf == NULL || len == 0) {
+        return 0;
+    }
+
+    if (pos > fileio->dir.size) {
+        return -EINVAL;
+    }
+
+    if (pos == fileio->dir.size) {
+        return 0;
+    }
+
+    if (fileio->dir.size - pos < (unsigned long long)len) {
+        len = fileio->dir.size - pos;
+    }
+
+    file_block_index = pos / NGFS_BLKSZ;
+    block_offset = pos % NGFS_BLKSZ;
+    curr_block = fileio->dir.start_block;
+
+    for (i = 0; i < file_block_index; i++) {
+        curr_block = get_next_data_block(fs, curr_block);
+        if (curr_block == NGFS_BLOCK_END) {
+            return -EIO;
+        }
+    }
+
+    bufp = (const char *)buf;
+    while (len > 0) {
+        phys_block_no = ngfs_phys_device_blockno(fs, curr_block);
+        result = cache_fetch(fs->cache, phys_block_no * NGFS_BLKSZ, 1, &blk);
+        if (result < 0) {
+            return result;
+        }
+
+        copy_len = (NGFS_BLKSZ - block_offset < (unsigned long)len)
+            ? (NGFS_BLKSZ - block_offset)
+            : (size_t)len;
+
+        memcpy((char *)blk + block_offset, bufp, copy_len);
+        cache_release(fs->cache, blk, 1);
+
+        len -= copy_len;
+        bufp += copy_len;
+        block_offset = 0;
+
+        if (len > 0) {
+            curr_block = get_next_data_block(fs, curr_block);
+            if (curr_block == NGFS_BLOCK_END) {
+                return -EIO;
+            }
+        }
+    }
+
+    retlen = bufp - (const char *)buf;
+    return retlen;
 }
