@@ -210,37 +210,37 @@ int spawn_thread (
     ...)
 {
     // YOUR CODE HERE
-    va_list variadic;                           //define the variadic argument list for reading optional arguments
-    struct thread * thrp;                       //pointer to the new thread
-    int tid;                                    //thread table slot
-    void * stack;                               //declare a allocating stack
+    va_list variadic;                           // define the variadic argument list for reading optional arguments
+    struct thread * thrp;                       // pointer to the new thread
+    int tid;                                    // thread table slot
+    void * stack;                               // declare a allocating stack
 
     for (tid = 0; tid < NTHR; tid++){
         if (thrtab[tid] == NULL){
-            break;                              //test for the first NULL in thrtab
+            break;                              // test for the first NULL in thrtab
         }
     }
         
 
-    if (tid >= NTHR) return -EMTHR;             //error: too many threads
+    if (tid >= NTHR) return -EMTHR;             // error: too many threads
         
-    thrp = kcalloc(1, sizeof(*thrp));           //allocate the thread and its stack
-    stack = kmalloc(HEAP_ALLOC_MAX);            
+    thrp = kcalloc(1, sizeof(*thrp));           // allocate the thread and its stack
+    stack = alloc_phys_page();           
 
     thrp->stack_lowest = stack;
-    thrp->stack_anchor = (void *)((char *)stack + HEAP_ALLOC_MAX - sizeof(struct thread_stack_anchor)); //update the anchor to be top of the stack to leave room
+    thrp->stack_anchor = (void *)((char *)stack + PAGE_SIZE - sizeof(struct thread_stack_anchor));
 
-    thrp->stack_anchor->ktp = thrp;             //initialize the stack anchor
+    thrp->stack_anchor->ktp = thrp;             // initialize the stack anchor
     thrp->stack_anchor->kgp = 0;
 
-    thrp->id = tid;                             //initilize the thread
+    thrp->id = tid;                             // initilize the thread
     thrp->name = (name != NULL) ? name : "none";
     thrp->state = THREAD_READY;
     thrp->parent = TP;
     thrp->proc = TP->proc;
-    condition_init(&thrp->child_exit, "child_exit");    //initialize the thread condition
+    condition_init(&thrp->child_exit, "child_exit");    // initialize the thread condition
 
-//extract: read the variadic arguments and then store to ctx.s
+    // extract: read the variadic arguments and then store to ctx.s
     va_start(variadic, entry);
     for (int i = 0; i < 8; i++)
         thrp->ctx.s[i] = (uintptr_t)va_arg(variadic, uintptr_t);
@@ -250,7 +250,7 @@ int spawn_thread (
     thrp->ctx.ra = &start_thread;
     thrp->ctx.sp = thrp->stack_anchor;
 
-    thrtab[tid] = thrp;                 //insert the new thread
+    thrtab[tid] = thrp;                 // insert the new thread
     tlinsert(&ready_list, thrp);
 
     return tid;
@@ -333,6 +333,13 @@ void yield_running_thread(void) {
 
     set_thread_state(nextthread, THREAD_RUNNING);
 
+    // switch to the next thread mspace before switching execution
+    if (nextthread->proc != NULL) {
+        switch_mspace(nextthread->proc->mtag);
+    } else {
+        switch_mspace(main_thread.proc->mtag);
+    }
+
     enable_interrupts();
     switch_running_thread(nextthread);      //enable the interrupts again
 }
@@ -350,6 +357,11 @@ void finish_thread_switch(struct thread * susp_thread) {
     int i = susp_thread->id;                                    //remove the thread from the table
     if (0 <= i && i < NTHR && thrtab[i] == susp_thread)
         thrtab[i] = NULL;
+
+    if (susp_thread->stack_lowest != NULL) {
+        free_phys_page(susp_thread->stack_lowest);
+        susp_thread->stack_lowest = NULL;
+    }
 
     kfree(susp_thread);                                     //free the thread object
 }
@@ -585,6 +597,7 @@ void rwlock_release(struct rwlock * rwlk) {
 //
 
 void init_main_thread(void) {
+    main_thread.stack_anchor->ktp = &main_thread;
 }
 
 void init_idle_thread(void) {
