@@ -105,6 +105,8 @@ void handle_smode_interrupt(unsigned int cause) {
 
 void handle_umode_interrupt(unsigned int cause) {
     // YOUR CODE HERE
+    // it handles both external interrupt and timer interrupt
+    handle_interrupt(cause);
     return;
 }
 
