@@ -131,7 +131,7 @@ long syscall(const struct trap_frame * tfr) {
             return syswrite(tfr->a0,(void *)tfr->a1,tfr->a2);
         
         case SYSCALL_IOCTL:
-            return syswrite(tfr->a0,tfr->a1,tfr->a2);
+            return sysioctl(tfr->a0, tfr->a1, tfr->a2);
         
         case SYSCALL_PIPE:
             return syspipe((int *)tfr->a0,(int *)tfr->a1);
@@ -250,6 +250,7 @@ int sysopen(int fd, const char * path) {
     char * filename_ptr;
     struct process * proc =current_process();
     int new_slot=-1;
+    struct io * io = NULL;
     //validate path is a valid user-accessible string
     result= validate_vstr(path,PTE_U);
     if(result !=0){
@@ -283,11 +284,12 @@ int sysopen(int fd, const char * path) {
     //make sure kpath is null terminated valid string
     memcpy(kpath,path,strlen(path)+1);
     parse_path(kpath,&mpname_ptr,&filename_ptr);
-    //open file and pass in the new slot in iotab
-    result=open_file(mpname_ptr,filename_ptr, &proc->iotab[new_slot]);
+    // temporarily open file in a local io pointer
+    result = open_file(mpname_ptr, filename_ptr, &io);
     if(result !=0){
         return result;
     }
+    proc->iotab[new_slot] = io; // mount io object into the allocated slot after open succeeds
     return new_slot;
 }
 
