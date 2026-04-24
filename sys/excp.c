@@ -80,5 +80,23 @@ void handle_smode_exception(unsigned int cause, struct trap_frame* tfr) {
 
 void handle_umode_exception(unsigned int cause, struct trap_frame * tfr) {
     // YOUR CODE HERE
-    return;
+    switch(cause){
+        case RISCV_SCAUSE_ECALL_FROM_UMODE:
+            handle_syscall(tfr);
+            return;
+        
+        // for the load page fault and store page fault the process is the same
+        case RISCV_SCAUSE_LOAD_PAGE_FAULT:
+        case RISCV_SCAUSE_STORE_PAGE_FAULT:
+        // stval contains the faulting virtual address for the user page fault.
+            if(handle_umode_page_fault(tfr, csrr_stval())==1){
+                return;
+            }
+        //if failed, break and process exit
+            break;
+        default:
+            break;
+    }
+    process_exit();
+
 }
