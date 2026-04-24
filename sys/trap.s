@@ -92,7 +92,111 @@ _smode_trap_entry:
 
 smode_trap_entry_from_umode:
 
-        # YOUR CODE HERE
+        # Save user registers to the trap frame pointed to by /sp/. The trap
+        # entry swap placed the interrupted user /sp/ in /sscratch/.
+
+        sd      a0, A0(sp)
+        sd      a1, A1(sp)
+        sd      a2, A2(sp)
+        sd      a3, A3(sp)
+        sd      a4, A4(sp)
+        sd      a5, A5(sp)
+        sd      a6, A6(sp)
+        sd      a7, A7(sp)
+        sd      t0, T0(sp)
+        sd      t1, T1(sp)
+        sd      t2, T2(sp)
+        sd      t3, T3(sp)
+        sd      t4, T4(sp)
+        sd      t5, T5(sp)
+        sd      t6, T6(sp)
+        sd      s1, S1(sp)
+        sd      s2, S2(sp)
+        sd      s3, S3(sp)
+        sd      s4, S4(sp)
+        sd      s5, S5(sp)
+        sd      s6, S6(sp)
+        sd      s7, S7(sp)
+        sd      s8, S8(sp)
+        sd      s9, S9(sp)
+        sd      s10, S10(sp)
+        sd      s11, S11(sp)
+        sd      ra, RA(sp)
+        sd      gp, GP(sp)
+        sd      tp, TP(sp)
+        sd      fp, FP(sp)
+
+        csrr    t6, sscratch
+        sd      t6, SP(sp)
+        csrw    sscratch, zero
+        rdinstret       t6
+        sd              t6, SINSTRET(sp)
+        csrr    t6, sstatus
+        sd      t6, SSTATUS(sp)
+        csrr    t6, sepc
+        sd      t6, SEPC(sp)
+
+        # Restore kernel /tp/ and /gp/ from the stack anchor above the trap
+        # frame, then dispatch using the same trap frame.
+
+        ld      tp, TFRSZ+KTP(sp)
+        ld      gp, TFRSZ+KGP(sp)
+        addi    fp, sp, TFRSZ
+        call    smode_trap_entry_umode_dispatch
+
+        # U mode handlers return here. Restore CSRs first, set sscratch back to
+        # this trap frame for the next U mode trap, then restore user registers.
+
+        ld      t6, SSTATUS(sp)
+        csrw    sstatus, t6
+        ld      t6, SEPC(sp)
+        csrw    sepc, t6
+        csrw    sscratch, sp
+
+        ld      a0, A0(sp)
+        ld      a1, A1(sp)
+        ld      a2, A2(sp)
+        ld      a3, A3(sp)
+        ld      a4, A4(sp)
+        ld      a5, A5(sp)
+        ld      a6, A6(sp)
+        ld      a7, A7(sp)
+        ld      t0, T0(sp)
+        ld      t1, T1(sp)
+        ld      t2, T2(sp)
+        ld      t3, T3(sp)
+        ld      t4, T4(sp)
+        ld      t5, T5(sp)
+        ld      s1, S1(sp)
+        ld      s2, S2(sp)
+        ld      s3, S3(sp)
+        ld      s4, S4(sp)
+        ld      s5, S5(sp)
+        ld      s6, S6(sp)
+        ld      s7, S7(sp)
+        ld      s8, S8(sp)
+        ld      s9, S9(sp)
+        ld      s10, S10(sp)
+        ld      s11, S11(sp)
+        ld      ra, RA(sp)
+        ld      gp, GP(sp)
+        ld      tp, TP(sp)
+        ld      fp, FP(sp)
+        ld      t6, T6(sp)
+        ld      sp, SP(sp)
+
+        sret
+
+smode_trap_entry_umode_dispatch:
+        csrr    a0, scause      # a0 contains "exception code"
+        mv      a1, sp          # a1 contains trap frame pointer
+
+        bgez    a0, handle_umode_exception # in excp.c
+
+        slli    a0, a0, 1       # clear msb
+        srli    a0, a0, 1       #
+
+        j       handle_umode_interrupt # in intr.c
 
 
 smode_trap_entry_from_smode:
