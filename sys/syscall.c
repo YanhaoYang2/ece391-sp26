@@ -487,10 +487,39 @@ int sysiodup(int oldfd, int newfd) {
 
 
 }
+static int age_bucket=0;
+static int age_set=0;
 
 int sysab1043(unsigned long long dob){
     // YOUR CODE HERE (CP3)
-
-    return 0;
+    struct io* rtcio;
+    int result;
+    unsigned long long time;
+    static unsigned long long udob=dob;
+    if(age_set==1){
+        return age_bucket;
+    }
+    result=open_device("rtc",&rtcio);
+    if(result<0){
+        return result;
+    }
+    result = ioread(rtcio,&time,sizeof(time));
+    //rtc open addref to it, RAII control
+    iodropref(rtcio);
+    if(result<0){
+        return result;
+    }
+    age_set=1;
+    long age=DAYS_TO_YR_APPX(TICK_TO_DAYS(time-udob));
+    if(age<13){
+        age_bucket=0;
+    }else if(age>=13 && age<16){
+        age_bucket=1;
+    }else if(age>=16 && age<18){
+        age_bucket=2;
+    }else{
+        age_bucket=3;
+    }
+    return age_bucket;
 }
 
