@@ -33,7 +33,7 @@
 
 static int build_stack(void * stack, int argc, char ** argv);
 
-static void fork_func(struct condition * forked, struct trap_frame * tfr);
+static void fork_func( struct trap_frame * tfr);
 
 // INTERNAL GLOBAL VARIABLES
 //
@@ -113,6 +113,12 @@ int process_fork(const struct trap_frame * tfr) {
         return -ENOMEM;
     }
     memset(child,0,sizeof(struct process));
+    struct trap_frame *child_tfr= kmalloc(sizeof(*child_tfr));
+    if(child_tfr==NULL){
+        kfree(child);
+        return -ENOMEM;
+    }
+    memcpy(child_tfr,tfr,sizeof(struct trap_frame));
     //clone address space;
     child->mtag=clone_active_mspace();
     //copy parent's io pointers with ioaddref
@@ -122,11 +128,9 @@ int process_fork(const struct trap_frame * tfr) {
         }
     }
     //Spawn a thread and attach it to the child process
-    struct condition done;
-    condition_init(&done, "fork_done");
     // avoid timer interrupt let child runs before conditin wait
     int pre=disable_interrupts();
-    int tid=spawn_thread("fork_entry_thread", (void (*)(void))fork_func,&done,(struct trap_frame *)tfr);
+    int tid=spawn_thread("fork_entry_thread", (void (*)(void))fork_func,child_tfr);
     // if spawn failed, we need to clear iotab, discard memory space and free memory used
     if(tid<0){
         for(int i=0;i<PROC_IOMAX;i++){
@@ -139,13 +143,63 @@ int process_fork(const struct trap_frame * tfr) {
         mtag_t cur_tag=switch_mspace(child->mtag);
         discard_active_mspace();
         switch_mspace(cur_tag);
-        
+        kfree(child_tfr);
         kfree(child);
         restore_interrupts(pre);    
         return tid;
     }
     child->tid=tid;
-    condition_wait(&done);
+int process_fork(const struct trap_frame * tfr) {
+    // YOUR CODE HERE
+    struct process * parent=current_process();
+    //try to allocate and initialize space for child process
+    struct process * child=kmalloc(sizeof(struct process));
+    if(child==NULL){
+        return -ENOMEM;
+    }
+    memset(child,0,sizeof(struct process));
+    struct trap_frame *child_tfr= kmalloc(sizeof(*child_tfr));
+    if(child_tfr==NULL){
+        kfree(child);
+        return -ENOMEM;
+    }
+    memcpy(child_tfr,tfr,sizeof(struct trap_frame));
+    //clone address space;
+    child->mtag=clone_active_mspace();
+    //copy parent's io pointers with ioaddref
+    for(int i=0;i<PROC_IOMAX;i++){
+        if(parent->iotab[i]!=NULL){
+            child->iotab[i]=ioaddref(parent->iotab[i]);
+        }
+    }
+    //Spawn a thread and attach it to the child process
+    // avoid timer interrupt let child runs before conditin wait
+    int pre=disable_interrupts();
+    int tid=spawn_thread("fork_entry_thread", (void (*)(void))fork_func,child_tfr);
+    // if spawn failed, we need to clear iotab, discard memory space and free memory used
+    if(tid<0){
+        for(int i=0;i<PROC_IOMAX;i++){
+            if(child->iotab[i]!=NULL){
+                iodropref(child->iotab[i]);
+                child->iotab[i] = NULL;
+            }
+        }
+         //switch to child mtag, discard it and switch back;
+        mtag_t cur_tag=switch_mspace(child->mtag);
+        discard_active_mspace();
+        switch_mspace(cur_tag);
+        kfree(child_tfr);
+        kfree(child);
+        restore_interrupts(pre);    
+        return tid;
+    }
+    child->tid=tid;
+    thread_attach_process(tid,child);
+    restore_interrupts(pre);
+
+    return tid;
+}
+
     restore_interrupts(pre);
 
     return tid;
@@ -232,13 +286,15 @@ int build_stack(void * stack, int argc, char ** argv) {
     return stksz;
 }
 
-void fork_func(struct condition * done, struct trap_frame * tfr) {
+void fork_func(struct trap_frame * tfr) {
     // YOUR CODE HERE
+    //use stack memory to save tfr and free child trap frame
+    struct trap_frame local_child_tfr;
+    memcpy(&local_child_tfr,tfr,sizeof(struct trap_frame));
+    kfree(tfr);
     // make sure return value of child fork is 0;
-    tfr->a0=0;
-    //finished using the tfr
-    condition_broadcast(done);
+    local_child_tfr.a0=0;
     void * scratch=(char *)running_thread_stack_anchor()-sizeof(struct trap_frame);
-    trap_frame_jump(tfr,scratch);
+    trap_frame_jump(&local_child_tfr,scratch);
     return;
 }
