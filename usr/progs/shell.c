@@ -35,6 +35,10 @@ static int handle_file_output(char* path);
 static void handle_pipe(int argc, char* argv[]);
 static void __attribute__ ((noreturn)) parse_and_exec(char* head);
 
+static int input_contain_slash(const char *input) {
+    return strchr(input, '/') != NULL;
+}
+
 // Executes the file in argv[0], passing in argc and argv. If argv[0] is not a
 // valid file path, it should prepend '/c/' before executing.
 //
@@ -47,6 +51,31 @@ static void __attribute__ ((noreturn)) parse_and_exec(char* head);
 // - on failure, print an error message and immediately exit.
 static void exec(int argc, char* argv[]) {
     // YOUR CODE HERE
+    char path[BUFSIZE];
+    int fd;
+    int result;
+    if (argc < 1 || argv[0] == NULL) {
+        dprintf(CONSOLEOUT, "exec is missing program\n");
+        _exit();
+    }
+
+    if (input_contain_slash(argv[0])) {
+        snprintf(path, BUFSIZE, "%s", argv[0]);
+    } else {
+        snprintf(path, BUFSIZE, "/c/%s", argv[0]); // if no '/' detected, assume path is in mountpoint /c
+    }
+
+    fd = _open(-1, path);
+    if (fd < 0) {
+        dprintf(CONSOLEOUT, "exec cannot open %s\n", path);
+        _exit();
+    }
+
+    result = _exec(fd, argc, argv);
+
+    // exec failed, as exec should not return on success run
+    dprintf(CONSOLEOUT, "exec failed to execute %s with error %d\n", path, result);
+    _close(fd);
     _exit();
 }
 
@@ -62,6 +91,17 @@ static void exec(int argc, char* argv[]) {
 //   execution.
 static void handle_sq(int argc, char* argv[]) {
     // YOUR CODE HERE
+    int child;
+    child = _fork();
+    if (child < 0) {
+        dprintf(CONSOLEOUT, "fork failed\n");
+        return;
+    }
+    // sequential execution, run command in child, then wait for it to return
+    if (child == 0) {
+        exec(argc, argv);
+    }
+    _wait(child);
     return;
 }
 
@@ -76,6 +116,16 @@ static void handle_sq(int argc, char* argv[]) {
 //   finished execution).
 static void handle_bg(int argc, char* argv[]) {
     // YOUR CODE HERE
+    int child;
+    child = _fork();
+    if (child < 0) {
+        dprintf(CONSOLEOUT, "fork failed\n");
+        return;
+    }
+    // background execution, run child and continue to next command (does not wait)
+    if (child == 0) {
+        exec(argc, argv);
+    }
     return;
 }
 
@@ -89,7 +139,14 @@ static void handle_bg(int argc, char* argv[]) {
 // - on failure, handle_file_input() returns a negative error code.
 static int handle_file_input(char* path) {
     // YOUR CODE HERE
-    return -ENOTSUP;
+    int result;
+    _close(STDIN);
+    result = _open(STDIN, path);
+    if (result < 0) {
+        dprintf(CONSOLEOUT, "handle file input redirection failed: %s\n", path);
+        return result;
+    }
+    return 0;
 }
 
 // Redirects STDOUT to /path/. Attemptes to create /path/ if it does not exist.
@@ -102,7 +159,23 @@ static int handle_file_input(char* path) {
 // - on failure, handle_file_output() returns a negative error code.
 static int handle_file_output(char* path) {
     // YOUR CODE HERE
-    return -ENOTSUP;
+    int result;
+    _close(STDOUT);
+    result = _open(STDOUT, path);
+    if (result < 0) {
+        // path does not exist, attempt to create path
+        result = _create(path);
+        if (result < 0) {
+            dprintf(CONSOLEOUT, "create failed: %s\n", path);
+            return result;
+        }
+        result = _open(STDOUT, path);
+        if (result < 0) {
+            dprintf(CONSOLEOUT, "handle file output redirection failed: %s\n", path);
+            return result;
+        }
+    }
+    return 0;
 }
 
 // Creates a pipe and a reader and writer process. The writer's STDOUT is 
@@ -123,6 +196,51 @@ static int handle_file_output(char* path) {
 // - on failure, handle_pipe() exits immediately.
 static void handle_pipe(int argc, char* argv[]) {
     // YOUR CODE HERE
+    int wfd;
+    int rfd;
+    int child;
+    int result;
+
+    // setup pipe
+    wfd = -1;
+    rfd = -1;
+    result = _pipe(&wfd, &rfd);
+    if (result < 0) {
+        dprintf(CONSOLEOUT, "pipe failed\n");
+        _exit();
+    }
+
+    child = _fork();
+    if (child < 0) {
+        dprintf(CONSOLEOUT, "fork failed in handle pipe\n");
+        _close(wfd);
+        _close(rfd);
+        _exit();
+    }
+    if (child == 0) {
+        // fork writer child, redirect stdout to the pipe writer end
+        _close(STDOUT); // iodup requires an empty destination fd, close stdout to fulfill
+        result = _iodup(wfd, STDOUT);
+        if (result < 0) {
+            dprintf(CONSOLEOUT, "pipe writer duplication failed\n");
+            _exit();
+        }
+        _close(wfd);
+        _close(rfd);
+        exec(argc, argv);
+    }
+
+    _close(STDIN); // redirect stdin to the pipe reader end
+    result = _iodup(rfd, STDIN);
+    if (result < 0) {
+        dprintf(CONSOLEOUT, "pipe reader duplication failed\n");
+        _close(wfd);
+        _close(rfd);
+        _exit();
+    }
+
+    _close(wfd); // close writer end inherited to allow right side command observe EOF when real writer exits
+    _close(rfd);
     return;
 }
 
@@ -239,12 +357,12 @@ void main() {
     RST_IO();
 
     // Your starting prompt
-	printf(/* CHANGE ME */ "Starting 391 Shell\n");
+	printf(/* CHANGE ME */ "Starting Shell...\n");
 
 	for (;;) {
         // Your shell prompt
         // Make sure your prompt ends in one of '>', '#', '$', '%'
-		printf(/* CHANGE ME */ "LUMON OS> ");
+		printf(/* CHANGE ME */ "GOGOGO OS> ");
 		getsn(buf, BUFSIZE - 1);
 
 		if (0 == strcmp(buf, "exit"))
@@ -256,5 +374,18 @@ void main() {
         // after the exec call has finished
         //
         // YOUR CODE HERE
+
+        // run the parsed user request in a child process
+        child = _fork();
+        if (child < 0) {
+            dprintf(CONSOLEOUT, "fork failed\n");
+            RST_IO();
+            continue;
+        }
+        if (child == 0) {
+            parse_and_exec(buf);
+        }
+        _wait(child);
+        RST_IO();
 	}
 }
