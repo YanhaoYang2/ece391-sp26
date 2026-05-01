@@ -18,6 +18,7 @@
 #include <stddef.h>
 #include "error.h"
 #include "heap.h"
+#include "intr.h"
 #include "misc.h"
 #include "string.h"
 #include "thread.h"
@@ -46,20 +47,28 @@ unsigned int iorefcnt(const struct io * io) {
 }
 
 struct io * ioaddref(struct io * io) {
+    // long prev;
+
+    // prev = disable_interrupts();
     io->refcnt += 1;
 
     if (io->refcnt == 0)
         panic("Too many io refs");
+    // restore_interrupts(prev);
     
     return io;
 }
 
 void iodropref(struct io * io) {
+    // long prev;
+
+    // prev = disable_interrupts();
     assert (io->refcnt != 0);
     io->refcnt -= 1;
 
     if (io->refcnt == 0 && io->intf->reclaim != NULL)
         io->intf->reclaim(io);
+    // restore_interrupts(prev);
 }
 
 long ioread(struct io * io, void * buf, long bufsz) {
@@ -516,6 +525,27 @@ static const struct iointf iopipe_reader_intf = {
 
 void create_iopipe(struct io ** wioptr, struct io ** rioptr) {
     // YOUR CODE HERE
+    struct iopipe * pipe;//newly allocated shared pipe object
+
+    pipe = kcalloc(1, sizeof(*pipe));//allocate the object
+    if (pipe == NULL) panic("pipe NULL");
+
+    pipe->buf = alloc_phys_page();//allocate one page for the buffer
+    if (pipe->buf == NULL) {
+        kfree(pipe);
+        panic("pipe buff null");
+    }
+//initlaize ring buffer
+    pipe->wpos = 0;
+    pipe->rpos = 0;
+    pipe->wbusy = 0;
+    condition_init(&pipe->updated, "iopipe.updated");
+
+    ioinit(&pipe->wio, &iopipe_writer_intf, 1, 1);
+    ioinit(&pipe->rio, &iopipe_reader_intf, 1, 1);
+//return the endpoints
+    *wioptr = &pipe->wio;
+    *rioptr = &pipe->rio;
     return;
 }
 
@@ -524,25 +554,119 @@ void create_iopipe(struct io ** wioptr, struct io ** rioptr) {
 
 void iopipe_wio_reclaim(struct io * io) {
     // YOUR CODE HERE
+    struct iopipe * const pipe = (struct iopipe *)io;//pipe from writer endpoint
+    int do_reclaim = 0;
+    int prev = disable_interrupts();
+
+    condition_broadcast(&pipe->updated);//wake to see endpoint closes.
+    do_reclaim = (pipe->rio.refcnt == 0);//reclaimed  the endpoint
+    restore_interrupts(prev);
+    if (do_reclaim) iopipe_reclaim(pipe);
     return;
 }
 
 void iopipe_rio_reclaim(struct io * io) {
     // YOUR CODE HERE
+    struct iopipe * const pipe = (void *)io - offsetof(struct iopipe, rio);//pipe from reader endpint
+    int do_reclaim = 0;
+    int prev = disable_interrupts();
+//same process as above
+    condition_broadcast(&pipe->updated);
+    do_reclaim = (pipe->wio.refcnt == 0);
+    restore_interrupts(prev);
+    if (do_reclaim) iopipe_reclaim(pipe);
     return;
 }
 
 long iopipe_write(struct io * io, const void * buf, long buflen) {
     // YOUR CODE HERE
-    return 0;
+    struct iopipe * const pipe = (struct iopipe *)io;//writer endpoint pipe object
+    const char * cbuf = buf;//buffer for writer playload
+    long n = 0;//numbde of bytes written
+    int prev;
+    int broken = 0;
+
+    if (buflen == 0) return 0;
+
+    prev = disable_interrupts();//disable interrupt before netering critical section
+
+    while (pipe->wbusy) {//only one writer is allowed at a time
+        condition_wait(&pipe->updated);
+        disable_interrupts();
+    }
+    pipe->wbusy = 1;
+
+    while (n < buflen) {//keep writing until all produced
+        unsigned short used = pipe->wpos - pipe->rpos;
+        unsigned short space = PAGE_SIZE - used;
+
+        if (pipe->rio.refcnt == 0) {
+            broken = 1;
+            break;
+        }
+
+        if (space == 0) {//buffer full
+            condition_wait(&pipe->updated);
+            disable_interrupts();
+            continue;
+        }
+
+        while (n < buflen && space > 0) {//copy into our available buffer space
+            ((char *)pipe->buf)[pipe->wpos % PAGE_SIZE] = cbuf[n++];
+            asm volatile ("" ::: "memory");
+            pipe->wpos += 1;
+            space -= 1;
+        }
+
+        condition_broadcast(&pipe->updated);
+    }
+
+    pipe->wbusy = 0;//release single writer
+    condition_broadcast(&pipe->updated);
+    restore_interrupts(prev);
+
+    if (n == 0 && broken)
+        return -EPIPE;
+
+    return n;
 }
 
 long iopipe_read(struct io * io, void * buf, long bufsz) {
     // YOUR CODE HERE
-    return 0;
+    struct iopipe * const pipe = (void *)io - offsetof(struct iopipe, rio);//reader endpoint's pipe object
+    char * cbuf = buf;
+    long n = 0;
+    int prev;
+    int flag = 0;//endpoint is closed and empty
+
+    if (bufsz == 0) return 0;
+
+    prev = disable_interrupts();
+
+    while (pipe->wpos == pipe->rpos) {//wait unless writer endpoint is closed.
+        if (pipe->wio.refcnt == 0) {
+            flag = 1;
+            break;
+        }
+        condition_wait(&pipe->updated);
+        disable_interrupts();
+    }
+
+    while (!flag && n < bufsz && pipe->wpos != pipe->rpos) {//consume available bytes
+        cbuf[n++] = ((char *)pipe->buf)[pipe->rpos % PAGE_SIZE];
+        asm volatile ("" ::: "memory");
+        pipe->rpos += 1;
+    }
+
+    condition_broadcast(&pipe->updated);//wake after consuming data
+    restore_interrupts(prev);
+    return n;
 }
 
 void iopipe_reclaim(struct iopipe * p) {
     // YOUR CODE HERE
+    //free back page buffer
+    free_phys_page(p->buf);
+    kfree(p);
     return;
 }
