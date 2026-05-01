@@ -123,4 +123,5 @@ extern int _pipe(int * wfdptr, int * rfdptr);
 */
 extern int _iodup(int oldfd, int newfd);
 
+extern int _ab1043(unsigned long long dob);
 #endif // _SYSCALL_H_
