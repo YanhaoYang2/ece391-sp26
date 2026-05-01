@@ -145,6 +145,7 @@ int process_fork(const struct trap_frame * tfr) {
         return tid;
     }
     child->tid=tid;
+    thread_attach_process(tid,child);
     condition_wait(&done);
     restore_interrupts(pre);
 

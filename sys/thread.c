@@ -388,12 +388,12 @@ int join_thread(int u_tid) {
             if (child->state == THREAD_EXITED) {            //check if the child has already exited
                 thrtab[u_tid] = NULL;
                 if (child->stack_lowest != NULL) {
-                    kfree(child->stack_lowest);
+                    free_phys_page(child->stack_lowest);
                     child->stack_lowest = NULL;
                 }
                 child->parent = NULL;               //set to null before freeing to avoid double freeing
-                enable_interrupts();
                 kfree(child);
+                enable_interrupts();
                 return u_tid;
             }
         } else {
@@ -409,12 +409,12 @@ int join_thread(int u_tid) {
                 if (child->state == THREAD_EXITED) {        //get the first child found
                     thrtab[i] = NULL;
                     if (child->stack_lowest != NULL) {
-                        kfree(child->stack_lowest);
+                        free_phys_page(child->stack_lowest);
                         child->stack_lowest = NULL;
                     }
                     child->parent = NULL;
-                    enable_interrupts();
                     kfree(child);
+                    enable_interrupts();
                     return i;
                 }
             }

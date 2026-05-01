@@ -495,7 +495,7 @@ int sysab1043(unsigned long long dob){
     struct io* rtcio;
     int result;
     unsigned long long time;
-    static unsigned long long udob=dob;
+     unsigned long long udob=dob;
     if(age_set==1){
         return age_bucket;
     }
