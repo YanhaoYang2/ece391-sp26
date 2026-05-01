@@ -172,7 +172,7 @@ int sysexec(int fd, int argc, char ** argv) {
 
 int sysfork(const struct trap_frame * tfr) {
     // YOUR CODE HERE
-    return 0;
+    return process_fork(tfr);
 }
 
 int syswait(int tid) {

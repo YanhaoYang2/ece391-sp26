@@ -27,7 +27,7 @@
 #include "thread.h"
 #include "trap.h"
 #include "io.h"
-
+#include "intr.h"
 // INTERNAL FUNCTION DECLARATIONS
 //
 
@@ -90,8 +90,8 @@ int process_exec(struct io * exeio, int argc, char ** argv) {
     struct  trap_frame t1={0};
     t1.sepc=eptr;
     t1.a0=argc;
-    //(void *)(UMEM_END_VMA - stksz) maps to stack + PAGE_SIZE - stksz in physical memory it is the stack pointer(growing downwards) and also the origin of the argv arrat (growing upwards)
-    t1.a1=(void *)(UMEM_END_VMA - stksz);
+    //(UMEM_END_VMA - stksz) maps to stack + PAGE_SIZE - stksz in physical memory it is the stack pointer(growing downwards) and also the origin of the argv arrat (growing upwards)
+    t1.a1=(uintptr_t *)(UMEM_END_VMA - stksz);
     t1.sp=(void *)(UMEM_END_VMA - stksz);
 
     t1.sstatus=csrr_sstatus();
@@ -106,7 +106,49 @@ int process_exec(struct io * exeio, int argc, char ** argv) {
 
 int process_fork(const struct trap_frame * tfr) {
     // YOUR CODE HERE
-    return 0;
+    struct process * parent=current_process();
+    //try to allocate and initialize space for child process
+    struct process * child=kmalloc(sizeof(struct process));
+    if(child==NULL){
+        return -ENOMEM;
+    }
+    memset(child,0,sizeof(struct process));
+    //clone address space;
+    child->mtag=clone_active_mspace();
+    //copy parent's io pointers with ioaddref
+    for(int i=0;i<PROC_IOMAX;i++){
+        if(parent->iotab[i]!=NULL){
+            child->iotab[i]=ioaddref(parent->iotab[i]);
+        }
+    }
+    //Spawn a thread and attach it to the child process
+    struct condition done;
+    condition_init(&done, "fork_done");
+    // avoid timer interrupt let child runs before conditin wait
+    int pre=disable_interrupts();
+    int tid=spawn_thread("fork_entry_thread", (void (*)(void))fork_func,&done,(struct trap_frame *)tfr);
+    // if spawn failed, we need to clear iotab, discard memory space and free memory used
+    if(tid<0){
+        for(int i=0;i<PROC_IOMAX;i++){
+            if(child->iotab[i]!=NULL){
+                iodropref(child->iotab[i]);
+                child->iotab[i] = NULL;
+            }
+        }
+         //switch to child mtag, discard it and switch back;
+        mtag_t cur_tag=switch_mspace(child->mtag);
+        discard_active_mspace();
+        switch_mspace(cur_tag);
+        
+        kfree(child);
+        restore_interrupts(pre);    
+        return tid;
+    }
+    child->tid=tid;
+    condition_wait(&done);
+    restore_interrupts(pre);
+
+    return tid;
 }
 
 void process_exit(void) {
@@ -134,7 +176,6 @@ void process_exit(void) {
 
     }
 
-    return;
 }
 
 // INTERNAL FUNCTION DEFINITIONS
@@ -193,5 +234,11 @@ int build_stack(void * stack, int argc, char ** argv) {
 
 void fork_func(struct condition * done, struct trap_frame * tfr) {
     // YOUR CODE HERE
+    // make sure return value of child fork is 0;
+    tfr->a0=0;
+    //finished using the tfr
+    condition_broadcast(done);
+    void * scratch=(char *)running_thread_stack_anchor()-sizeof(struct trap_frame);
+    trap_frame_jump(tfr,scratch);
     return;
 }
