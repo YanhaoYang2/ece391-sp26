@@ -391,6 +391,67 @@ int sysioctl(int fd, int op, uintptr_t arg_uma) {
 
 int syspipe(int * wfdptr, int * rfdptr) {
     // YOUR CODE HERE
+    int result;
+    struct process * proc =current_process();
+
+    //validate both pointer points to user accessible integer 
+    result= enforce_vptr((void *)wfdptr,sizeof(int),PTE_U);
+    if(result!=0){
+        return result;
+    }
+    result= enforce_vptr((void *)rfdptr,sizeof(int),PTE_U);
+    if(result!=0){
+        return result;
+    }
+    int w_val=*wfdptr;
+    int r_val=*rfdptr;
+    int w_slot=-1;
+    int r_slot=-1;
+    // two file fd shouldnt be equal if positive;
+    if(w_val>=0 && w_val==r_val){
+        return -EINVAL;
+    }
+    if(w_val>=0){
+        if(w_val>=PROC_IOMAX){
+            return -EBADF;
+        }
+        if(proc->iotab[w_val]!=NULL){
+            return -EMFILE;
+        }
+        w_slot=w_val;
+    }else{
+        for(int i=0;i<PROC_IOMAX;i++){
+            if(i!=r_val && proc->iotab[i]==NULL){
+                w_slot=i;
+                break;
+            }
+        }
+        if(w_slot==-1){
+            return -EMFILE;
+        }
+    }
+    if(r_val>=0){
+        if(r_val>=PROC_IOMAX){
+            return -EBADF;
+        }
+        if(proc->iotab[r_val]!=NULL){
+            return -EMFILE;
+        }
+        r_slot=r_val;
+    }else{
+        for(int i=0;i<PROC_IOMAX;i++){
+            if(i!=w_slot&& proc->iotab[i]==NULL){
+                r_slot=i;
+                break;
+            }
+        }
+        if(r_slot==-1){
+            return -EMFILE;
+        }
+    }
+    create_iopipe(&proc->iotab[w_slot],&proc->iotab[r_slot]);
+    *wfdptr=w_slot;
+    *rfdptr=r_slot;
     return 0;
 }
 
@@ -429,6 +490,7 @@ int sysiodup(int oldfd, int newfd) {
 
 int sysab1043(unsigned long long dob){
     // YOUR CODE HERE (CP3)
+
     return 0;
 }
 
