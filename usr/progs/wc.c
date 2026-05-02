@@ -11,6 +11,7 @@ void main(int argc, char *argv[]) {
     int close_fd_tag;
     long n;
     int is_space = 1;
+    int dup_line_end_flag = 0;
     unsigned long lines = 0;
     unsigned long words = 0;
     unsigned long chars = 0;
@@ -39,10 +40,18 @@ void main(int argc, char *argv[]) {
         if (n == 0) {
             break;
         }
-        for (int i = 0; i < 1; i++) {
+        for (int i = 0; i < n; i++) {
             chars++;
-            if (buf[i] == '\n') {
+            if (buf[i] == '\r') {
                 lines++;
+                dup_line_end_flag = 1;
+            } else if (buf[i] == '\n') {
+                if (!dup_line_end_flag) {
+                    lines++;
+                }
+                dup_line_end_flag = 0;
+            } else {
+                dup_line_end_flag = 0;
             }
             if (isspace(buf[i])) {
                 is_space = 1; // check if the current char is a space, if so, indicates the previous word ends, ready for next

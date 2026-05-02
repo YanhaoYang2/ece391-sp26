@@ -330,7 +330,9 @@ static void parse_and_exec(char* head) {
             break;
 
         case PIPE: // set up pipe
-            RST_IO(); // any previous redirections are invalid
+            // commenting out rst_io line to test its impact on failing multipipe-behavior tests
+            // reseting io might cause consecutive pipes to read from console instead of the last pipe's reader
+            // RST_IO(); // any previous redirections are invalid
             handle_pipe(argc, argv);
             // writer has been exec'd and is writing into the pipe
             // now parse and exec reader, who is reading from the pipe

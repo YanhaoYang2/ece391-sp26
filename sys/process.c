@@ -91,7 +91,7 @@ int process_exec(struct io * exeio, int argc, char ** argv) {
     t1.sepc=eptr;
     t1.a0=argc;
     //(UMEM_END_VMA - stksz) maps to stack + PAGE_SIZE - stksz in physical memory it is the stack pointer(growing downwards) and also the origin of the argv arrat (growing upwards)
-    t1.a1=(uintptr_t *)(UMEM_END_VMA - stksz);
+    t1.a1=(uintptr_t)(UMEM_END_VMA - stksz);
     t1.sp=(void *)(UMEM_END_VMA - stksz);
 
     t1.sstatus=csrr_sstatus();
