@@ -52,6 +52,7 @@ unsigned int timer_frequency = 0;
 //
 
 static struct timer_alarm * sleep_list; // list of pending alarms
+static unsigned long long bolt_interval_ticks;
 
 
 // INTERNAL FUNCTION DECLARATIONS
@@ -69,8 +70,12 @@ void timer_init(unsigned int freq) {
     // YOUR CODE HERE
     timer_frequency = freq;         //record the hardware timer frequency
     sleep_list = NULL;
-    disable_timer_interrupts();
-    sbi_set_timer(ULLONG_MAX);
+    bolt_interval_ticks = freq / BOLT_FREQ;
+    if (bolt_interval_ticks == 0)
+        bolt_interval_ticks = 1;
+
+    sbi_set_timer(rdtime() + bolt_interval_ticks);
+    enable_timer_interrupts();
     timer_initialized = 1;
 }
 
@@ -121,6 +126,9 @@ void sleep_us(unsigned int us) {
 void handle_timer_interrupt(void) {
 
     unsigned long long tnow = rdtime();
+    unsigned long long next_bolt;
+    unsigned long long next_alarm;
+    unsigned long long next_deadline;
 
     trace("[%lu] %s()", tnow, __func__);
 
@@ -134,13 +142,11 @@ void handle_timer_interrupt(void) {
         condition_broadcast(&a->cond);
     }
 
-    if (sleep_list != NULL) {
-        sbi_set_timer(sleep_list->twake);
-        enable_timer_interrupts();
-    } else {
-        sbi_set_timer(ULLONG_MAX);
-        disable_timer_interrupts();
-    }//disable interrupts if no alarms is here
+    next_bolt = tnow + bolt_interval_ticks;
+    next_alarm = (sleep_list != NULL) ? sleep_list->twake : ULLONG_MAX;
+    next_deadline = (next_alarm < next_bolt) ? next_alarm : next_bolt;
+    sbi_set_timer(next_deadline);
+    enable_timer_interrupts();
 }
 
 // INTERNAL FUNCTION DEFINITIONS

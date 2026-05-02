@@ -107,6 +107,7 @@ void handle_umode_interrupt(unsigned int cause) {
     // YOUR CODE HERE
     // it handles both external interrupt and timer interrupt
     handle_interrupt(cause);
+    yield_running_thread();
     return;
 }
 
