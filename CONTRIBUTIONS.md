@@ -7,6 +7,9 @@
 本文根据两个课程仓库的原始 git 记录重建（`git log --author=yanhaoy2`、`git blame`），
 只列出**我本人**写的部分，不代表团队整体产出。
 
+> **范围：** 从 MP0 到 MP2 CP4（含 `mp2cp4`）完全由我独立完成；`gogogo` 的
+> MP3 CP1–CP3 与最终 OS 属于 team_78 的团队工作。
+
 ---
 
 ## 一、个人阶段（MP0 – MP2）
@@ -70,7 +73,7 @@
 | --- | --- | --- |
 | `sys/syscall.c` | 357 / 525 | 68% |
 | `sys/cache.c` | 153 / 216 | 71% |
-| `sys/process.c` | 118 / 245 | 48%（骨架以外 100%） |
+| `sys/process.c` | 117 / 245 | 48%（骨架以外 100%） |
 | `sys/trap.s` | 105 / 393 | 27% |
 | `sys/excp.c` | 19 / 102 | 19% |
 | 其余 | 共 15 行 | — |
@@ -117,6 +120,9 @@ git blame team/final -- sys/cache.c
 This statement is reconstructed from the original git history of the two course
 repositories (`git log --author=yanhaoy2`, `git blame`). It covers what I wrote,
 not what the team as a whole produced.
+
+> **Scope:** everything from MP0 through MP2 CP4 (inclusive) is my own solo work;
+> the `gogogo` MP3 checkpoints and the final OS are team work of team_78.
 
 ## 1. Individual phase (MP0 – MP2)
 
@@ -181,7 +187,7 @@ user-mode trap entry.
 | --- | --- | --- |
 | `sys/syscall.c` | 357 / 525 | 68% |
 | `sys/cache.c` | 153 / 216 | 71% |
-| `sys/process.c` | 118 / 245 | 48% (100% outside skeleton) |
+| `sys/process.c` | 117 / 245 | 48% (100% outside skeleton) |
 | `sys/trap.s` | 105 / 393 | 27% |
 | `sys/excp.c` | 19 / 102 | 19% |
 | others | 15 lines total | — |

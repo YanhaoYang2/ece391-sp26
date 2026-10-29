@@ -8,10 +8,12 @@ Urbana-Champaign, Spring 2026.
 The course was a two-stage project:
 
 1. **Individual phase** — MP0 (toolchain/boot), MP1 (RISC-V assembly graphics
-   library), MP2 (kernel drivers, interrupts, threads, timers). This phase is
-   entirely my own work.
+   library) and MP2 through checkpoint CP4 (`mp2cp4`): kernel drivers,
+   interrupts, threads, timers. **Everything up to and including `mp2cp4` is
+   entirely my own work — no team code is involved.**
 2. **Team phase** — MP3 (file-system cache, processes, syscalls, user mode) and
    the final OS, done in team **team_78 "gogogo"** with `ziyanz6` and `xuzheh2`.
+   This part is joint team work.
 
 See **[CONTRIBUTIONS.md](CONTRIBUTIONS.md)** for a detailed statement of what I
 personally wrote in each phase.
@@ -24,7 +26,8 @@ personally wrote in each phase.
 | `individual/mp0` | MP0 submission (boot / toolchain) |
 | `individual/mp1` | MP1 skyline graphics library in RISC-V assembly |
 | `individual/mp2cp1` … `individual/mp2cp4` | MP2 checkpoints CP1–CP4 |
-| `team/final` | team_78 final OS (MP3 CP3 / `team_draft`) |
+| `team/final` | team_78 final merged OS (MP3 CP3); identical to the submitted archive |
+| `team/graded` | the exact commit that was graded (2026-05-01), before post-deadline preemption work |
 | `team/mp3cp1` … `team/mp3cp3` | Team checkpoints CP1–CP3 |
 
 `main` and the `team/*` branches have unrelated histories: the team repository
@@ -77,10 +80,11 @@ games) and `util/fs/` (host-side ngfs image tools).
 
 项目分两个阶段：
 
-1. **个人阶段** —— MP0（工具链/启动）、MP1（RISC-V 汇编图形库）、MP2（内核驱动、中断、
-   线程、定时器），全部由我独立完成。
+1. **个人阶段** —— MP0（工具链/启动）、MP1（RISC-V 汇编图形库）以及 MP2 直到 CP4
+   （`mp2cp4`）的内核驱动、中断、线程、定时器。**从 MP0 到 MP2 CP4（含 CP4）全部由我
+   独立完成，不含任何团队代码。**
 2. **团队阶段** —— MP3（文件系统缓存、进程、系统调用、用户态）与最终操作系统，由
-   **team_78「gogogo」** 完成，成员为 `ziyanz6`、`xuzheh2`、`yanhaoy2`。
+   **team_78「gogogo」** 共同完成，成员为 `ziyanz6`、`xuzheh2`、`yanhaoy2`。
 
 我在每个阶段具体写了哪些代码，见 **[CONTRIBUTIONS.md](CONTRIBUTIONS.md)**。
 
@@ -92,7 +96,8 @@ games) and `util/fs/` (host-side ngfs image tools).
 | `individual/mp0` | MP0 提交（启动/工具链） |
 | `individual/mp1` | MP1 RISC-V 汇编图形库 |
 | `individual/mp2cp1` … `individual/mp2cp4` | MP2 各检查点 |
-| `team/final` | team_78 最终操作系统（MP3 CP3 / `team_draft`） |
+| `team/final` | team_78 最终合并版操作系统（MP3 CP3），与提交的压缩包完全一致 |
+| `team/graded` | 实际参与评分的那次提交（2026-05-01），在截止后的 preemption 改动之前 |
 | `team/mp3cp1` … `team/mp3cp3` | 团队各检查点 |
 
 `main` 与 `team/*` 是两段互不相关的历史：团队仓库从课程提供的 MP3 骨架开始，并非由
