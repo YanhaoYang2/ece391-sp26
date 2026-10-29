@@ -60,24 +60,6 @@
 | 线程修复 | `sys/thread.c` | +4 / −4 | `join_thread` 的内存释放逻辑。 |
 | 用户态桩函数 | `usr/syscall.S`、`usr/syscall.h` | +8 | `_ab1043` 等用户侧封装。 |
 
-> **关于 `thread.c` 的说明：** 团队仓库的 `sys/thread.c` 基础实现来自队友 `xuzheh2` 的
-> "merged with mp2" 提交（2026-04-01），不是我的个人 MP2 代码（团队从各人的 MP2 中选了
-> 一份合并）。我在团队里对 `thread.c` 的贡献只有 `join_thread` 修复。我完整实现的线程子系统
-> 在个人阶段（MP2 CP3，`sys/thread.c` 456 行）。
-
-### 最终代码归属（团队 `team/final`）
-
-`git blame` 统计（我最后修改的当前行数 / 文件总行数）：
-
-| 文件 | 我的行数 / 总行数 | 占比 |
-| --- | --- | --- |
-| `sys/syscall.c` | 357 / 525 | 68% |
-| `sys/cache.c` | 153 / 216 | 71% |
-| `sys/process.c` | 117 / 245 | 48%（骨架以外 100%） |
-| `sys/trap.s` | 105 / 393 | 27% |
-| `sys/excp.c` | 19 / 102 | 19% |
-| 其余 | 共 15 行 | — |
-
 ### 我在团队阶段的提交时间线
 
 | 日期 | 工作 |
@@ -172,25 +154,6 @@ user-mode trap entry.
 | User-mode interrupts | `sys/intr.c` | +2 | Interrupt path for user mode. |
 | Thread fix | `sys/thread.c` | +4 / −4 | `join_thread` memory-free logic. |
 | User stubs | `usr/syscall.S`, `usr/syscall.h` | +8 | `_ab1043` and related user-side wrappers. |
-
-> **Note on `thread.c`:** the team's `sys/thread.c` base implementation came from
-> teammate `xuzheh2`'s "merged with mp2" commit (2026-04-01) — the team picked one
-> member's MP2 implementation, and it was not my copy. My only team-phase change
-> to `thread.c` is the `join_thread` fix. The thread subsystem I wrote in full is
-> the individual one (MP2 CP3, `sys/thread.c`, 456 lines).
-
-### Ownership of the final team code
-
-`git blame` on `team/final` (percentage of current lines last touched by me):
-
-| File | My lines / total | Share |
-| --- | --- | --- |
-| `sys/syscall.c` | 357 / 525 | 68% |
-| `sys/cache.c` | 153 / 216 | 71% |
-| `sys/process.c` | 117 / 245 | 48% (100% outside skeleton) |
-| `sys/trap.s` | 105 / 393 | 27% |
-| `sys/excp.c` | 19 / 102 | 19% |
-| others | 15 lines total | — |
 
 ### Timeline of my team commits
 
