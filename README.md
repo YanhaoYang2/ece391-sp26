@@ -69,8 +69,11 @@ games) and `util/fs/` (host-side ngfs image tools).
 - Everything here was produced for ECE 391 SP26 coursework. The team branches
   contain joint work of team_78 and are archived for reference; the individual
   branches are my own work.
-- The repository is private on purpose: course solutions should not be used by
-  future students.
+- **Do not copy.** This is solution code for ECE 391, published for reference
+  only. Using any part of it — or code derived from it — in your own coursework
+  submission is academic dishonesty under the [UIUC Student
+  Code](https://studentcode.illinois.edu/) and the ECE 391 course policy.
+
 
 ---
 
@@ -118,4 +121,5 @@ make debug      # 带 gdbstub（:1234）
 
 - 本仓库内容均为 ECE 391 SP26 课程作业。`team/*` 分支是 team_78 的共同成果，仅作存档；
   个人分支是我自己的代码。
-- 仓库设为私有，避免后续选课同学直接使用课程答案。
+- **请勿抄袭。**&#8203; 本仓库是 ECE 391 的作业答案，仅供阅读参考。把其中任何代码（或改写
+  后的版本）用于自己的课程提交，属于学术不端，违反 UIUC Student Code 与课程规定。
